@@ -17,6 +17,13 @@ pub struct CapturedContext {
     pub method: String,
 }
 
+pub struct WindowStateInfo {
+    pub is_desktop_or_shell: bool,
+    pub process_name: String,
+    pub title: String,
+    pub hwnd_val: isize,
+}
+
 #[cfg(windows)]
 mod platform {
     use super::*;
@@ -31,6 +38,50 @@ mod platform {
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
     static LAST_FOREGROUND_HWND: AtomicIsize = AtomicIsize::new(0);
+
+    pub fn get_foreground_window_state() -> WindowStateInfo {
+        unsafe {
+            let hwnd = GetForegroundWindow();
+            if hwnd.is_null() {
+                return WindowStateInfo {
+                    is_desktop_or_shell: false,
+                    process_name: String::new(),
+                    title: String::new(),
+                    hwnd_val: 0,
+                };
+            }
+
+            let mut class_buf = [0u16; 256];
+            let len = GetClassNameW(hwnd, class_buf.as_mut_ptr(), 256);
+            let is_desktop_or_shell = if len > 0 {
+                let class_name = String::from_utf16_lossy(&class_buf[..len as usize]);
+                let lower = class_name.to_lowercase();
+                lower == "progman"
+                    || lower == "workerw"
+                    || lower == "shell_traywnd"
+                    || lower == "shell_secondarytraywnd"
+            } else {
+                false
+            };
+
+            let process_name = get_process_name_for_hwnd(hwnd);
+
+            let mut title_buf = [0u16; 512];
+            let title_len = GetWindowTextW(hwnd, title_buf.as_mut_ptr(), 512);
+            let title = if title_len > 0 {
+                String::from_utf16_lossy(&title_buf[..title_len as usize])
+            } else {
+                String::new()
+            };
+
+            WindowStateInfo {
+                is_desktop_or_shell,
+                process_name,
+                title,
+                hwnd_val: hwnd as isize,
+            }
+        }
+    }
 
     pub fn get_process_name_for_hwnd(hwnd: HWND) -> String {
         unsafe {
@@ -308,6 +359,19 @@ mod platform {
     use super::*;
     use std::time::Duration;
 
+    pub fn get_foreground_window_state() -> WindowStateInfo {
+        WindowStateInfo {
+            is_desktop_or_shell: false,
+            process_name: String::new(),
+            title: String::new(),
+            hwnd_val: 0,
+        }
+    }
+
+    pub fn capture_via_accessibility() -> Option<CapturedContext> {
+        None
+    }
+
     pub fn capture_active_context() -> CapturedContext {
         let mut clipboard = arboard::Clipboard::new().ok();
         let backup_text = clipboard.as_mut().and_then(|c| c.get_text().ok());
@@ -368,7 +432,12 @@ mod platform {
     }
 }
 
-pub use platform::{capture_active_context, replace_active_text};
+pub use platform::{
+    capture_active_context,
+    capture_via_accessibility,
+    get_foreground_window_state,
+    replace_active_text,
+};
 
 pub fn get_active_process_name() -> String {
     #[cfg(windows)]

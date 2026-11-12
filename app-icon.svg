@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0F172A" />
+      <stop offset="50%" stop-color="#1E1B4B" />
+      <stop offset="100%" stop-color="#020617" />
+    </linearGradient>
+
+    <!-- Border Glow Gradient -->
+    <linearGradient id="borderGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#818CF8" stop-opacity="0.8" />
+      <stop offset="50%" stop-color="#6366F1" stop-opacity="0.3" />
+      <stop offset="100%" stop-color="#C084FC" stop-opacity="0.6" />
+    </linearGradient>
+
+    <!-- Left Stem Gradient (Cool Indigo/Cyan) -->
+    <linearGradient id="leftStem" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#A5B4FC" />
+      <stop offset="50%" stop-color="#6366F1" />
+      <stop offset="100%" stop-color="#4338CA" />
+    </linearGradient>
+
+    <!-- Right Stem Gradient -->
+    <linearGradient id="rightStem" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#818CF8" />
+      <stop offset="50%" stop-color="#4F46E5" />
+      <stop offset="100%" stop-color="#312E81" />
+    </linearGradient>
+
+    <!-- Diagonal Quill / Pen Nib Gradient (Vibrant Gold & Rose) -->
+    <linearGradient id="quillGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FDE047" />
+      <stop offset="35%" stop-color="#F59E0B" />
+      <stop offset="70%" stop-color="#F43F5E" />
+      <stop offset="100%" stop-color="#D946EF" />
+    </linearGradient>
+
+    <!-- Quill Feather Spline Gradient -->
+    <linearGradient id="featherGrad" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.9" />
+      <stop offset="50%" stop-color="#818CF8" stop-opacity="0.8" />
+      <stop offset="100%" stop-color="#C084FC" stop-opacity="0.6" />
+    </linearGradient>
+
+    <!-- Shadow filter for depth -->
+    <filter id="dropShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="16" stdDeviation="24" flood-color="#000000" flood-opacity="0.6" />
+    </filter>
+
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="16" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <!-- Base Squircle with Shadow -->
+  <rect x="32" y="32" width="960" height="960" rx="224" fill="url(#bgGrad)" stroke="url(#borderGrad)" stroke-width="12" filter="url(#dropShadow)" />
+
+  <!-- Subtle Inner Ambient Mesh Glow -->
+  <circle cx="512" cy="460" r="320" fill="#4F46E5" opacity="0.18" filter="url(#glow)" />
+  <circle cx="680" cy="620" r="220" fill="#F43F5E" opacity="0.12" filter="url(#glow)" />
+
+  <!-- The Nishikanto 'N' + Quill Motif Group -->
+  <g filter="url(#dropShadow)">
+    <!-- 1. Left Vertical Stem of N -->
+    <rect x="236" y="248" width="108" height="528" rx="54" fill="url(#leftStem)" />
+
+    <!-- 2. Right Vertical Stem of N -->
+    <rect x="680" y="248" width="108" height="528" rx="54" fill="url(#rightStem)" />
+
+    <!-- 3. Dynamic Feather Curve behind the diagonal -->
+    <path d="M 330 260 C 440 320, 560 440, 690 730 C 650 670, 580 570, 480 470 C 400 390, 350 330, 330 260 Z"
+          fill="url(#featherGrad)" opacity="0.75" />
+
+    <!-- 4. Main Diagonal Quill Stroke (Cutting through from Left to Right) -->
+    <path d="M 270 270 C 360 270, 470 370, 580 500 L 730 730 C 746 756, 730 784, 696 784 C 650 784, 560 700, 460 570 L 310 340 C 274 290, 260 270, 270 270 Z"
+          fill="url(#quillGrad)" />
+
+    <!-- 5. Stylized Fountain Pen Nib Detail on the Diagonal -->
+    <path d="M 700 710 L 760 786 L 730 800 L 664 740 Z" fill="#FDE047" opacity="0.95" />
+    <circle cx="736" cy="780" r="5" fill="#1E1B4B" />
+
+    <!-- 6. Golden Quill Slit Line -->
+    <line x1="736" y1="780" x2="620" y2="650" stroke="#FFFBEB" stroke-width="4" stroke-linecap="round" opacity="0.8" />
+
+    <!-- 7. Radiant Sparkle at the Quill Nib Tip -->
+    <g transform="translate(766, 792)">
+      <!-- 4-point star -->
+      <path d="M 0 -36 Q 0 0 -36 0 Q 0 0 0 36 Q 0 0 36 0 Q 0 0 0 -36 Z" fill="#FFFFFF" filter="url(#glow)" />
+      <circle cx="0" cy="0" r="8" fill="#FDE047" />
+    </g>
+
+    <!-- 8. Small Accent Sparkle (Top Left Accent) -->
+    <g transform="translate(370, 210) scale(0.6)">
+      <path d="M 0 -24 Q 0 0 -24 0 Q 0 0 0 24 Q 0 0 24 0 Q 0 0 0 -24 Z" fill="#A5B4FC" opacity="0.85" />
+    </g>
+  </g>
+</svg>

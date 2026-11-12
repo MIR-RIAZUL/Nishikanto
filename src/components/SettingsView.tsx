@@ -13,6 +13,7 @@ import {
   Trash2,
   RefreshCw,
   Zap,
+  Laptop,
 } from "lucide-react";
 import {
   getPersonalDictionary,
@@ -26,6 +27,11 @@ import {
   AppExclusionItem,
 } from "../services/db";
 import { invoke } from "@tauri-apps/api/core";
+import {
+  enable as enableAutostart,
+  disable as disableAutostart,
+  isEnabled as isAutostartEnabled,
+} from "@tauri-apps/plugin-autostart";
 
 export function SettingsView() {
   // API Key state
@@ -56,6 +62,10 @@ export function SettingsView() {
   const [newAppDisplay, setNewAppDisplay] = useState<string>("");
   const [activeProcess, setActiveProcess] = useState<string>("");
 
+  // System Autostart state
+  const [autostart, setAutostart] = useState<boolean>(false);
+  const [isTogglingAutostart, setIsTogglingAutostart] = useState<boolean>(false);
+
   // Load initial settings from SQLite
   useEffect(() => {
     async function loadData() {
@@ -79,16 +89,42 @@ export function SettingsView() {
       const ex = await getAppExclusions();
       setExclusions(ex);
 
-      // Query current active foreground process
+      // 5. Query current active foreground process
       try {
         const proc = await invoke<string>("get_active_process");
         if (proc) setActiveProcess(proc);
       } catch {
         // ignore
       }
+
+      // 6. Query Autostart status
+      try {
+        const enabled = await isAutostartEnabled();
+        setAutostart(enabled);
+      } catch (e) {
+        console.warn("Could not check autostart:", e);
+      }
     }
     loadData();
   }, []);
+
+  // Toggle autostart on system boot
+  const handleToggleAutostart = async () => {
+    setIsTogglingAutostart(true);
+    try {
+      if (autostart) {
+        await disableAutostart();
+        setAutostart(false);
+      } else {
+        await enableAutostart();
+        setAutostart(true);
+      }
+    } catch (err) {
+      console.warn("Failed to toggle autostart:", err);
+    } finally {
+      setIsTogglingAutostart(false);
+    }
+  };
 
   // Save API Key
   const handleSaveApiKey = async () => {
@@ -370,6 +406,59 @@ export function SettingsView() {
               </div>
             </div>
           </div>
+        </div>
+      </div>
+
+      {/* SECTION: System Startup & Autostart */}
+      <div className="rounded-2xl border border-white/10 bg-slate-900/50 p-5 backdrop-blur-sm space-y-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2 text-sm font-semibold text-white">
+            <div className="p-1.5 rounded-lg bg-sky-500/10 border border-sky-500/20 text-sky-400">
+              <Laptop className="w-4 h-4" />
+            </div>
+            <span>System Startup &amp; Background Tray</span>
+          </div>
+          <span className="text-[11px] text-slate-400">
+            Auto-launch on boot
+          </span>
+        </div>
+
+        <div className="flex items-center justify-between p-3.5 rounded-xl bg-slate-950/70 border border-white/5">
+          <div className="space-y-1 pr-4">
+            <div className="text-xs font-semibold text-white flex items-center gap-2">
+              <span>Launch Nishikanto when my computer starts</span>
+              {autostart ? (
+                <span className="text-[10px] font-mono text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.2 rounded">
+                  Enabled
+                </span>
+              ) : (
+                <span className="text-[10px] font-mono text-slate-400 bg-white/5 border border-white/5 px-1.5 py-0.2 rounded">
+                  Disabled
+                </span>
+              )}
+            </div>
+            <p className="text-[11px] text-slate-400 leading-relaxed">
+              Launches Nishikanto in the background minimized to the System Tray when your PC boots. The instant offline writing engine stays ready across all external desktop apps.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            disabled={isTogglingAutostart}
+            onClick={handleToggleAutostart}
+            className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+              autostart ? "bg-indigo-600" : "bg-slate-700"
+            } ${isTogglingAutostart ? "opacity-50 cursor-wait" : ""}`}
+            role="switch"
+            aria-checked={autostart}
+          >
+            <span
+              aria-hidden="true"
+              className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
+                autostart ? "translate-x-5" : "translate-x-0"
+              }`}
+            />
+          </button>
         </div>
       </div>
 

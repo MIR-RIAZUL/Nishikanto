@@ -52,6 +52,7 @@ pub struct AppState {
     pub custom_dictionary: Mutex<std::collections::HashSet<String>>,
     pub app_exclusions: Mutex<std::collections::HashSet<String>>,
     pub custom_api_key: Mutex<Option<String>>,
+    pub widget_expanded: AtomicBool,
 }
 
 fn categorize_lint(kind: LintKind, message: &str) -> (&'static str, String) {
@@ -263,7 +264,13 @@ async fn analyze_with_gemini(
     let api_key = {
         let custom = state.custom_api_key.lock().unwrap();
         if let Some(ref k) = *custom {
-            k.clone()
+            if !k.trim().is_empty() {
+                k.trim().to_string()
+            } else {
+                std::env::var("GEMINI_API_KEY")
+                    .or_else(|_| dotenvy::var("GEMINI_API_KEY"))
+                    .unwrap_or_default()
+            }
         } else {
             std::env::var("GEMINI_API_KEY")
                 .or_else(|_| dotenvy::var("GEMINI_API_KEY"))
@@ -275,7 +282,7 @@ async fn analyze_with_gemini(
         return Ok(GeminiAnalysisResult {
             success: false,
             status: "missing_api_key".to_string(),
-            message: "GEMINI_API_KEY is not configured in .env. Offline Harper engine is active. Set GEMINI_API_KEY in .env to enable cloud AI features.".to_string(),
+            message: "No Gemini API key configured. Offline Harper engine is actively checking your text. Add your Gemini API key in Settings to enable cloud AI rewrites.".to_string(),
             tone: "Professional & Direct ✍️".to_string(),
             score: 82,
             rewritten_text: text,
@@ -536,7 +543,12 @@ pub fn trigger_os_capture_and_show(app: &tauri::AppHandle) -> Result<os_bridge::
 }
 
 #[tauri::command]
-fn replace_active_text(app: tauri::AppHandle, new_text: String) -> Result<(), String> {
+fn replace_active_text(
+    app: tauri::AppHandle,
+    state: State<Arc<AppState>>,
+    new_text: String,
+) -> Result<(), String> {
+    state.widget_expanded.store(false, Ordering::SeqCst);
     os_bridge::replace_active_text(&new_text)?;
     // Collapse to compact pill upon applying replacement
     if let Some(widget_win) = app.get_webview_window("widget") {
@@ -546,7 +558,8 @@ fn replace_active_text(app: tauri::AppHandle, new_text: String) -> Result<(), St
 }
 
 #[tauri::command]
-fn expand_widget(app: tauri::AppHandle) {
+fn expand_widget(app: tauri::AppHandle, state: State<Arc<AppState>>) {
+    state.widget_expanded.store(true, Ordering::SeqCst);
     if let Some(widget_win) = app.get_webview_window("widget") {
         if let Ok(pos) = widget_win.outer_position() {
             if let Ok(Some(monitor)) = widget_win.current_monitor() {
@@ -577,14 +590,16 @@ fn expand_widget(app: tauri::AppHandle) {
 }
 
 #[tauri::command]
-fn collapse_widget(app: tauri::AppHandle) {
+fn collapse_widget(app: tauri::AppHandle, state: State<Arc<AppState>>) {
+    state.widget_expanded.store(false, Ordering::SeqCst);
     if let Some(widget_win) = app.get_webview_window("widget") {
         let _ = widget_win.set_size(LogicalSize::new(52.0, 52.0));
     }
 }
 
 #[tauri::command]
-fn hide_widget(app: tauri::AppHandle) {
+fn hide_widget(app: tauri::AppHandle, state: State<Arc<AppState>>) {
+    state.widget_expanded.store(false, Ordering::SeqCst);
     if let Some(widget_win) = app.get_webview_window("widget") {
         let _ = widget_win.hide();
     }
@@ -754,14 +769,26 @@ async fn test_gemini_connection(
 ) -> Result<serde_json::Value, String> {
     let key = if let Some(k) = api_key {
         if !k.trim().is_empty() {
-            k
+            k.trim().to_string()
         } else {
             let custom = state.custom_api_key.lock().unwrap();
-            custom.clone().or_else(|| std::env::var("GEMINI_API_KEY").ok()).unwrap_or_default()
+            custom
+                .as_ref()
+                .filter(|k| !k.trim().is_empty())
+                .cloned()
+                .or_else(|| std::env::var("GEMINI_API_KEY").ok())
+                .or_else(|| dotenvy::var("GEMINI_API_KEY").ok())
+                .unwrap_or_default()
         }
     } else {
         let custom = state.custom_api_key.lock().unwrap();
-        custom.clone().or_else(|| std::env::var("GEMINI_API_KEY").ok()).unwrap_or_default()
+        custom
+            .as_ref()
+            .filter(|k| !k.trim().is_empty())
+            .cloned()
+            .or_else(|| std::env::var("GEMINI_API_KEY").ok())
+            .or_else(|| dotenvy::var("GEMINI_API_KEY").ok())
+            .unwrap_or_default()
     };
 
     if key.trim().is_empty() {
@@ -827,6 +854,7 @@ pub fn run() {
         custom_dictionary: Mutex::new(std::collections::HashSet::new()),
         app_exclusions: Mutex::new(std::collections::HashSet::new()),
         custom_api_key: Mutex::new(None),
+        widget_expanded: AtomicBool::new(false),
     });
 
     let global_shortcut_plugin = tauri_plugin_global_shortcut::Builder::new()
@@ -840,9 +868,21 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_sql::Builder::default().build())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--minimized"]),
+        ))
         .plugin(global_shortcut_plugin)
         .manage(app_state.clone())
         .setup(move |app| {
+            // Check for startup flag --minimized (launch minimized to tray on boot)
+            let is_minimized_launch = std::env::args().any(|arg| arg == "--minimized");
+            if is_minimized_launch {
+                if let Some(main_win) = app.get_webview_window("main") {
+                    let _ = main_win.hide();
+                }
+            }
+
             // Dynamic shortcut registration with fallback protection
             let primary_str = if cfg!(target_os = "macos") { "Option+G" } else { "Alt+G" };
             let fallback_str = if cfg!(target_os = "macos") { "Option+Shift+G" } else { "Alt+Shift+G" };
@@ -933,6 +973,210 @@ pub fn run() {
                 })
                 .build(app)?;
 
+            // Real-time 500ms debounced typing watcher with focus guard & desktop auto-hide
+            let watcher_app = app.handle().clone();
+            let watcher_state = app_state.clone();
+            std::thread::spawn(move || {
+                let mut last_text = String::new();
+                let mut last_bounds = os_bridge::ScreenRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 0.0,
+                    height: 0.0,
+                };
+                let mut last_hwnd: isize = 0;
+                let mut non_text_ticks: u32 = 0;
+
+                let current_exe_name = std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()))
+                    .unwrap_or_default();
+
+                loop {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+
+                    if watcher_state.paused.load(Ordering::SeqCst) {
+                        continue;
+                    }
+
+                    let win_state = os_bridge::get_foreground_window_state();
+                    if win_state.hwnd_val == 0 {
+                        continue;
+                    }
+
+                    // Don't auto-hide or process if foreground is Nishikanto editor or widget
+                    let is_our_exe = !current_exe_name.is_empty()
+                        && win_state.process_name.to_lowercase() == current_exe_name;
+                    let is_our_title = win_state.title.contains("Nishikanto");
+                    if is_our_exe || is_our_title {
+                        continue;
+                    }
+
+                    // Auto-hide when user clicks desktop wallpaper/icons or Windows taskbar
+                    if win_state.is_desktop_or_shell {
+                        if let Some(widget_win) = watcher_app.get_webview_window("widget") {
+                            if widget_win.is_visible().unwrap_or(false) {
+                                let _ = widget_win.hide();
+                            }
+                        }
+                        last_text.clear();
+                        continue;
+                    }
+
+                    // Auto-hide when user focuses a blacklisted/excluded application
+                    let is_blacklisted = {
+                        let exclusions = watcher_state.app_exclusions.lock().unwrap();
+                        let proc = win_state.process_name.to_lowercase();
+                        let title = win_state.title.to_lowercase();
+                        (!proc.is_empty()
+                            && (exclusions.contains(&proc)
+                                || exclusions.iter().any(|ex| proc.contains(ex))))
+                            || (!title.is_empty()
+                                && (exclusions.contains(&title)
+                                    || exclusions.iter().any(|ex| title.contains(ex))))
+                    };
+
+                    if is_blacklisted {
+                        if let Some(widget_win) = watcher_app.get_webview_window("widget") {
+                            if widget_win.is_visible().unwrap_or(false) {
+                                let _ = widget_win.hide();
+                            }
+                        }
+                        last_text.clear();
+                        continue;
+                    }
+
+                    // Non-intrusive UIA typing check (never simulates keystrokes or touches clipboard)
+                    if let Some(ctx) = os_bridge::capture_via_accessibility() {
+                        non_text_ticks = 0;
+                        let text_changed = ctx.text != last_text;
+                        let bounds_changed = (ctx.bounds.x - last_bounds.x).abs() > 4.0
+                            || (ctx.bounds.y - last_bounds.y).abs() > 4.0;
+                        let window_switched = win_state.hwnd_val != last_hwnd;
+
+                        if text_changed || bounds_changed || window_switched {
+                            last_text = ctx.text.clone();
+                            last_bounds = ctx.bounds.clone();
+                            last_hwnd = win_state.hwnd_val;
+
+                            // Run local Harper check (<5ms)
+                            let lints = if !ctx.text.trim().is_empty() {
+                                let doc = Document::new_markdown_default_curated(&ctx.text);
+                                if let Ok(mut lg) = watcher_state.lint_group.lock() {
+                                    let mut raw_lints = lg.lint(&doc);
+                                    remove_overlaps(&mut raw_lints);
+
+                                    let chars: Vec<char> = ctx.text.chars().collect();
+                                    let total = chars.len();
+                                    let mut res = Vec::new();
+
+                                    for (idx, lint) in raw_lints.into_iter().enumerate() {
+                                        let start = lint.span.start.min(total);
+                                        let end = lint.span.end.min(total);
+                                        if start < end {
+                                            let flagged_text = chars[start..end].iter().collect();
+                                            let (cat, subcat) =
+                                                categorize_lint(lint.lint_kind, &lint.message);
+                                            let mut suggestions = Vec::new();
+                                            for s in lint.suggestions {
+                                                match s {
+                                                    Suggestion::ReplaceWith(c) => {
+                                                        suggestions.push(c.into_iter().collect())
+                                                    }
+                                                    Suggestion::InsertAfter(c) => {
+                                                        suggestions.push(c.into_iter().collect())
+                                                    }
+                                                    Suggestion::Remove => {
+                                                        suggestions.push(String::new())
+                                                    }
+                                                }
+                                            }
+                                            res.push(LocalLintResult {
+                                                id: format!("auto-lint-{}-{}-{}", start, end, idx),
+                                                start,
+                                                end,
+                                                flagged_text,
+                                                category: cat.to_string(),
+                                                subcategory: subcat,
+                                                message: lint.message,
+                                                suggestions,
+                                            });
+                                        }
+                                    }
+                                    let custom_dict =
+                                        watcher_state.custom_dictionary.lock().unwrap();
+                                    res.retain(|r| {
+                                        let text_lower = r.flagged_text.to_lowercase();
+                                        let text_trim = r.flagged_text.trim().to_lowercase();
+                                        !custom_dict.contains(&text_lower)
+                                            && !custom_dict.contains(&text_trim)
+                                    });
+                                    res
+                                } else {
+                                    Vec::new()
+                                }
+                            } else {
+                                Vec::new()
+                            };
+
+                            let payload = OsCapturePayload {
+                                text: ctx.text.clone(),
+                                source_app: ctx.source_app.clone(),
+                                process_name: ctx.process_name.clone(),
+                                method: ctx.method.clone(),
+                                bounds: ctx.bounds.clone(),
+                                lints,
+                            };
+                            let _ = watcher_app.emit("os-text-captured", payload);
+
+                            // Position widget beside the active text box
+                            if let Some(widget_win) = watcher_app.get_webview_window("widget") {
+                                let mut target_x = ctx.bounds.x + ctx.bounds.width + 8.0;
+                                let mut target_y =
+                                    ctx.bounds.y + (ctx.bounds.height / 2.0) - 26.0;
+
+                                if let Ok(Some(monitor)) = widget_win.current_monitor() {
+                                    let m_size = monitor.size();
+                                    let scale = monitor.scale_factor();
+                                    let screen_w = m_size.width as f64 / scale;
+                                    let screen_h = m_size.height as f64 / scale;
+
+                                    if target_x + 60.0 > screen_w {
+                                        target_x = (ctx.bounds.x - 60.0).max(12.0);
+                                    } else {
+                                        target_x =
+                                            target_x.clamp(12.0, (screen_w - 60.0).max(12.0));
+                                    }
+                                    target_y = target_y.clamp(12.0, (screen_h - 60.0).max(12.0));
+                                }
+
+                                let _ = widget_win.set_position(tauri::Position::Logical(
+                                    LogicalPosition::new(target_x, target_y),
+                                ));
+                                if !widget_win.is_visible().unwrap_or(false)
+                                    && !ctx.text.trim().is_empty()
+                                {
+                                    let _ = widget_win.show();
+                                }
+                            }
+                        }
+                    } else {
+                        // Not in an editable text control
+                        non_text_ticks += 1;
+                        if non_text_ticks >= 2
+                            && !watcher_state.widget_expanded.load(Ordering::SeqCst)
+                        {
+                            if let Some(widget_win) = watcher_app.get_webview_window("widget") {
+                                if widget_win.is_visible().unwrap_or(false) {
+                                    let _ = widget_win.hide();
+                                }
+                            }
+                            last_text.clear();
+                        }
+                    }
+                }
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -979,6 +1223,7 @@ mod engine_tests {
             custom_dictionary: Mutex::new(std::collections::HashSet::new()),
             app_exclusions: Mutex::new(std::collections::HashSet::new()),
             custom_api_key: Mutex::new(None),
+            widget_expanded: AtomicBool::new(false),
         });
 
         let doc = Document::new_markdown_default_curated(sample);
@@ -1036,6 +1281,7 @@ mod engine_tests {
             custom_dictionary: Mutex::new(custom_dict),
             app_exclusions: Mutex::new(std::collections::HashSet::new()),
             custom_api_key: Mutex::new(None),
+            widget_expanded: AtomicBool::new(false),
         });
 
         let dict = app_state.custom_dictionary.lock().unwrap();
