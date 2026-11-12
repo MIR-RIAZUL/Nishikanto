@@ -13,11 +13,13 @@ export interface LocalLintResult {
   start: number;
   end: number;
   flagged_text: string;
-  category: "Correctness" | "Clarity" | "Style";
+  category: "Correctness" | "Clarity" | "Style" | "Fluency" | string;
   subcategory: string;
   message: string;
   suggestions: string[];
   screen_bounds?: ScreenRect;
+  is_sentence_rewrite?: boolean;
+  reason?: string;
 }
 
 export interface GeminiAnalysisResult {

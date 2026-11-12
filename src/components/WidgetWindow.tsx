@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   Sparkles,
   Check,
@@ -11,6 +11,7 @@ import {
   Loader2,
   X,
   ChevronRight,
+  ChevronLeft,
   BookMarked,
   ShieldAlert,
   Trash2,
@@ -20,6 +21,7 @@ import { LocalLintResult, GeminiAnalysisResult } from "../hooks/useWritingEngine
 import { addWordToDictionary, addAppExclusion } from "../services/db";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 
 interface OsCapturePayload {
   text: string;
@@ -51,6 +53,7 @@ export function WidgetWindow() {
     isPaused,
     openMainEditor,
     expandWidget,
+    expandPillToMicro,
     collapseWidget,
     replaceActiveText,
     replaceSingleWord,
@@ -58,7 +61,7 @@ export function WidgetWindow() {
     captureActiveText,
   } = useTauriState();
 
-  // Widget display modes: "pill" (40x40 circular button), "micro" (Grammarly popover card), "full" (AI tone & rewrite panel)
+  // Widget display modes: "pill" (sleek 32x32 circular badge), "micro" (Grammarly popover card), "full" (AI tone & rewrite panel)
   const [mode, setMode] = useState<WidgetMode>("pill");
   const [activeMicroLint, setActiveMicroLint] = useState<LocalLintResult | null>(null);
   const [lastAction, setLastAction] = useState<string | null>(null);
@@ -70,6 +73,130 @@ export function WidgetWindow() {
   const [capturedLints, setCapturedLints] = useState<LocalLintResult[]>([]);
   const [isAiProcessing, setIsAiProcessing] = useState<boolean>(false);
   const [appliedSuccess, setAppliedSuccess] = useState<boolean>(false);
+  const [textboxBounds, setTextboxBounds] = useState<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }>({ x: 0, y: 0, width: 0, height: 0 });
+
+  // Floating pill mouse dragging state
+  const dragRef = useRef<{
+    startX: number;
+    startY: number;
+    moved: boolean;
+  } | null>(null);
+
+  // Hover 250ms delay state to avoid accidental dismissals
+  const hoverTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const cancelHoverCollapse = useCallback(() => {
+    if (hoverTimeoutRef.current) {
+      clearTimeout(hoverTimeoutRef.current);
+      hoverTimeoutRef.current = null;
+    }
+  }, []);
+
+  const handleCollapseToPill = useCallback(async () => {
+    cancelHoverCollapse();
+    setMode("pill");
+    setActiveMicroLint(null);
+    await collapseWidget();
+  }, [cancelHoverCollapse, collapseWidget]);
+
+  const scheduleHoverCollapse = useCallback(() => {
+    cancelHoverCollapse();
+    hoverTimeoutRef.current = setTimeout(() => {
+      handleCollapseToPill();
+    }, 250);
+  }, [cancelHoverCollapse, handleCollapseToPill]);
+
+  useEffect(() => {
+    return () => {
+      cancelHoverCollapse();
+    };
+  }, [cancelHoverCollapse]);
+
+  // Priority ranking: sentence rewrites first, then correctness, then other suggestions
+  const getTopPriorityLint = useCallback((lints: LocalLintResult[]): LocalLintResult | null => {
+    if (!lints || lints.length === 0) return null;
+    const sorted = [...lints].sort((a, b) => {
+      const aIsSent = Boolean(
+        a.is_sentence_rewrite ||
+        a.flagged_text.split(/\s+/).length > 2 ||
+        (a.suggestions[0] && a.suggestions[0].split(/\s+/).length > 3)
+      );
+      const bIsSent = Boolean(
+        b.is_sentence_rewrite ||
+        b.flagged_text.split(/\s+/).length > 2 ||
+        (b.suggestions[0] && b.suggestions[0].split(/\s+/).length > 3)
+      );
+      if (aIsSent && !bIsSent) return -1;
+      if (!aIsSent && bIsSent) return 1;
+      if (a.category === "Correctness" && b.category !== "Correctness") return -1;
+      if (a.category !== "Correctness" && b.category === "Correctness") return 1;
+      return 0;
+    });
+    return sorted[0];
+  }, []);
+
+  // Hovering over the floating pill immediately opens the top suggestion
+  const handlePillMouseEnter = useCallback(async () => {
+    cancelHoverCollapse();
+    if (dragRef.current?.moved) return;
+    if (capturedLints.length > 0) {
+      const topLint = getTopPriorityLint(capturedLints);
+      if (topLint) {
+        setActiveMicroLint(topLint);
+        setMode("micro");
+        await expandPillToMicro();
+      }
+    }
+  }, [cancelHoverCollapse, capturedLints, getTopPriorityLint, expandPillToMicro]);
+
+  const handlePillPointerDown = (e: React.PointerEvent) => {
+    if (e.button !== 0) return; // Only left mouse click
+    dragRef.current = {
+      startX: e.screenX,
+      startY: e.screenY,
+      moved: false,
+    };
+  };
+
+  const handlePillPointerMove = async (e: React.PointerEvent) => {
+    if (!dragRef.current) return;
+    const dx = e.screenX - dragRef.current.startX;
+    const dy = e.screenY - dragRef.current.startY;
+    if (!dragRef.current.moved && Math.hypot(dx, dy) > 4) {
+      dragRef.current.moved = true;
+      try {
+        await invoke("start_pill_drag");
+        const currentWin = getCurrentWebviewWindow();
+        await currentWin.startDragging();
+        // Mouse released, window dragging finished:
+        const pos = await currentWin.outerPosition();
+        const boxRight = textboxBounds.x + textboxBounds.width;
+        const boxBottom = textboxBounds.y + textboxBounds.height;
+        await invoke("end_pill_drag", {
+          screenX: pos.x,
+          screenY: pos.y,
+          boxRight,
+          boxBottom,
+        });
+      } catch (err) {
+        console.warn("Pill drag error:", err);
+        await invoke("end_pill_drag_cancel").catch(() => {});
+      }
+    }
+  };
+
+  const handlePillPointerUp = () => {
+    if (dragRef.current && !dragRef.current.moved) {
+      // Single click under 4px movement: expand/collapse suggestion
+      handlePillClick();
+    }
+    dragRef.current = null;
+  };
 
   // Derive overall tone like Grammarly
   const overallTone = useMemo(() => {
@@ -100,17 +227,12 @@ export function WidgetWindow() {
     return "Confident 🎯";
   }, [capturedText, capturedLints]);
 
-  // Expansion and collapse handlers
+  // Expansion handler
   const handleExpandToFull = useCallback(async () => {
+    cancelHoverCollapse();
     setMode("full");
     await expandWidget();
-  }, [expandWidget]);
-
-  const handleCollapseToPill = useCallback(async () => {
-    setMode("pill");
-    setActiveMicroLint(null);
-    await collapseWidget();
-  }, [collapseWidget]);
+  }, [cancelHoverCollapse, expandWidget]);
 
   // Handle pill click (trigger micro-popover on first flagged word or expand)
   const handlePillClick = useCallback(async () => {
@@ -143,6 +265,9 @@ export function WidgetWindow() {
       setSourceApp(payload.source_app || "Active App");
       setProcessName(payload.process_name || "");
       setCapturedLints(payload.lints || []);
+      if (payload.bounds) {
+        setTextboxBounds(payload.bounds);
+      }
       setLastAction("Captured via Alt+G");
       setTimeout(() => setLastAction(null), 2500);
     }).then((fn) => {
@@ -191,49 +316,131 @@ export function WidgetWindow() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [mode, handleCollapseToPill]);
 
-  // Accept single word suggestion from micro-popover (replaces ONLY that word)
+  // Helper for category dot styling
+  const getCategoryDotClass = (cat?: string) => {
+    switch (cat) {
+      case "Correctness":
+        return "bg-red-500 shadow-red-500/50";
+      case "Clarity":
+        return "bg-blue-500 shadow-blue-500/50";
+      case "Fluency":
+        return "bg-indigo-500 shadow-indigo-500/50";
+      default:
+        return "bg-amber-500 shadow-amber-500/50";
+    }
+  };
+
+  // Track active lint index for < 1 of 3 > pagination
+  const currentLintIndex = useMemo(() => {
+    if (!activeMicroLint) return 0;
+    const idx = capturedLints.findIndex((l) => l.id === activeMicroLint.id);
+    return idx >= 0 ? idx : 0;
+  }, [activeMicroLint, capturedLints]);
+
+  const handleStepLint = async (direction: "prev" | "next") => {
+    if (capturedLints.length <= 1) return;
+    const total = capturedLints.length;
+    let nextIdx = 0;
+    if (direction === "prev") {
+      nextIdx = currentLintIndex > 0 ? currentLintIndex - 1 : total - 1;
+    } else {
+      nextIdx = currentLintIndex < total - 1 ? currentLintIndex + 1 : 0;
+    }
+    const targetLint = capturedLints[nextIdx];
+    setActiveMicroLint(targetLint);
+    if (targetLint.screen_bounds) {
+      await showMicroPopover(
+        targetLint.screen_bounds.x,
+        targetLint.screen_bounds.y + targetLint.screen_bounds.height + 6.0,
+        targetLint
+      );
+    }
+  };
+
+  // Accept single word or sentence suggestion from micro-popover (replaces that exact span in-place)
   const handleAcceptSingleWord = async (lint: LocalLintResult) => {
     const replacement = lint.suggestions[0] || "fix";
-    const chars = Array.from(capturedText);
-    const before = chars.slice(0, lint.start).join("");
-    const after = chars.slice(lint.end).join("");
-    const updatedFull = before + replacement + after;
+    const originalSpan = lint.flagged_text || "";
 
-    await replaceSingleWord(
+    const updatedFull = await replaceSingleWord(
       lint.start,
       lint.end,
       replacement,
-      updatedFull,
-      lint.id
+      capturedText,
+      lint.id,
+      originalSpan
     );
 
-    setCapturedText(updatedFull);
-    setCapturedLints((prev) => prev.filter((l) => l.id !== lint.id));
-    setActiveMicroLint(null);
-    setMode("pill");
-    await collapseWidget();
-  };
+    // Immediately remove that applied suggestion from the active list
+    const remaining = capturedLints.filter((l) => l.id !== lint.id);
+    setCapturedLints(remaining);
+    if (updatedFull) {
+      setCapturedText(updatedFull);
+    }
 
-  // Dismiss a lint from current session
-  const handleDismissLint = async (lintId: string) => {
-    setCapturedLints((prev) => prev.filter((l) => l.id !== lintId));
-    if (activeMicroLint?.id === lintId) {
+    if (remaining.length > 0) {
+      const nextLint = remaining[0];
+      setActiveMicroLint(nextLint);
+      if (nextLint.screen_bounds) {
+        await showMicroPopover(
+          nextLint.screen_bounds.x,
+          nextLint.screen_bounds.y + nextLint.screen_bounds.height + 6.0,
+          nextLint
+        );
+      }
+    } else {
       setActiveMicroLint(null);
       setMode("pill");
       await collapseWidget();
     }
   };
 
+  // Dismiss a lint from current session
+  const handleDismissLint = async (lintId: string) => {
+    const remaining = capturedLints.filter((l) => l.id !== lintId);
+    setCapturedLints(remaining);
+    if (activeMicroLint?.id === lintId) {
+      if (remaining.length > 0) {
+        const nextLint = remaining[0];
+        setActiveMicroLint(nextLint);
+        if (nextLint.screen_bounds) {
+          await showMicroPopover(
+            nextLint.screen_bounds.x,
+            nextLint.screen_bounds.y + nextLint.screen_bounds.height + 6.0,
+            nextLint
+          );
+        }
+      } else {
+        setActiveMicroLint(null);
+        setMode("pill");
+        await collapseWidget();
+      }
+    }
+  };
+
   // Add word to personal dictionary
   const handleAddToDictionary = async (word: string, lintId: string) => {
     await addWordToDictionary(word);
-    setCapturedLints((prev) => prev.filter((l) => l.id !== lintId));
+    const remaining = capturedLints.filter((l) => l.id !== lintId);
+    setCapturedLints(remaining);
     setLastAction(`Saved to Dict: ${word}`);
     setTimeout(() => setLastAction(null), 2000);
     if (activeMicroLint?.id === lintId) {
-      setActiveMicroLint(null);
-      setMode("pill");
-      await collapseWidget();
+      if (remaining.length > 0) {
+        const nextLint = remaining[0];
+        setActiveMicroLint(nextLint);
+        if (nextLint.screen_bounds) {
+          await showMicroPopover(
+            nextLint.screen_bounds.x,
+            nextLint.screen_bounds.y + nextLint.screen_bounds.height + 6.0,
+            nextLint
+          );
+        }
+      } else {
+        setActiveMicroLint(null);
+        setMode("pill");
+        await collapseWidget();
+      }
     }
   };
 
@@ -288,7 +495,7 @@ export function WidgetWindow() {
   };
 
   // -------------------------------------------------------------
-  // 1. COMPACT FLOATING PILL STATE (40x40px sleek circular pill)
+  // 1. COMPACT FLOATING PILL STATE (32x32px circular Grammarly badge)
   // -------------------------------------------------------------
   if (mode === "pill") {
     const issueCount = capturedLints.length;
@@ -296,43 +503,46 @@ export function WidgetWindow() {
 
     return (
       <div
-        className="w-[52px] h-[52px] flex items-center justify-center relative p-1 select-none font-sans antialiased"
-        data-tauri-drag-region
+        className="w-full h-full flex items-center justify-center relative bg-transparent p-0 m-0 select-none font-sans antialiased overflow-visible"
       >
         <button
-          data-tauri-drag-region
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={handlePillClick}
+          onPointerDown={handlePillPointerDown}
+          onPointerMove={handlePillPointerMove}
+          onPointerUp={handlePillPointerUp}
+          onPointerCancel={() => {
+            dragRef.current = null;
+          }}
+          onMouseEnter={handlePillMouseEnter}
           onContextMenu={(e) => {
             e.preventDefault();
             handleExpandToFull();
           }}
           title={
             isClean
-              ? "Nishikanto: All clear! Click to open assistant."
-              : `Nishikanto: ${issueCount} suggestion${issueCount === 1 ? "" : "s"}. Click to review.`
+              ? "Nishikanto: All clear! Drag to reposition, click to open assistant."
+              : `Nishikanto: ${issueCount} suggestion${issueCount === 1 ? "" : "s"}. Hover to view top suggestion, drag to move.`
           }
-          className={`w-10 h-10 rounded-full cursor-pointer relative flex items-center justify-center transition-all duration-300 shadow-[0_4px_20px_rgba(0,0,0,0.65)] hover:scale-105 active:scale-95 ${
+          className={`w-8 h-8 rounded-full cursor-grab active:cursor-grabbing relative flex items-center justify-center transition-all duration-150 hover:scale-105 active:scale-95 ${
             isClean
-              ? "bg-slate-900/95 border-2 border-emerald-500/70 hover:border-emerald-400 ring-2 ring-emerald-500/20"
-              : "bg-slate-900/95 border-2 border-indigo-500/70 hover:border-indigo-400 ring-2 ring-indigo-500/20"
+              ? "bg-gradient-to-br from-emerald-500 to-teal-600 shadow-[inset_0_1px_1px_rgba(255,255,255,0.4),0_2px_8px_rgba(16,185,129,0.35)]"
+              : "bg-gradient-to-br from-indigo-500 to-indigo-700 shadow-[inset_0_1px_1px_rgba(255,255,255,0.4),0_2px_8px_rgba(99,102,241,0.35)]"
           }`}
         >
           {isAiProcessing ? (
-            <Loader2 className="w-5 h-5 text-indigo-400 animate-spin" />
+            <Loader2 className="w-4 h-4 text-white animate-spin" />
           ) : isClean ? (
-            <Check className="w-5 h-5 text-emerald-400 stroke-[3]" />
+            <Check className="w-4 h-4 text-white stroke-[2.75]" />
           ) : (
-            <Sparkles className="w-4 h-4 text-indigo-300" />
+            <Sparkles className="w-3.5 h-3.5 text-white" />
           )}
 
-          {/* Issue Count Badge */}
+          {/* Clean Red / Blue Pill Counter Badge */}
           {!isClean && (
             <span
-              className={`absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-bold flex items-center justify-center text-white shadow-md animate-pulse ${
+              className={`absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full text-[9px] font-extrabold flex items-center justify-center text-white border border-white/40 shadow-sm leading-none ${
                 capturedLints.some((l) => l.category === "Correctness")
-                  ? "bg-red-500 shadow-red-500/50"
-                  : "bg-amber-500 shadow-amber-500/50"
+                  ? "bg-red-500"
+                  : "bg-blue-500"
               }`}
             >
               {issueCount}
@@ -349,77 +559,156 @@ export function WidgetWindow() {
   }
 
   // -------------------------------------------------------------
-  // 2. GRAMMARLY-STYLE MICRO-POPOVER CARD (260x145px)
+  // 2. GRAMMARLY-STYLE MICRO-POPOVER CARD (290x185px)
   // -------------------------------------------------------------
   if (mode === "micro" && activeMicroLint) {
     const primarySuggestion = activeMicroLint.suggestions[0] || "Fix";
+    const reasonHeader = activeMicroLint.reason || getRuleDescription(activeMicroLint);
+    const isSentence = Boolean(
+      activeMicroLint.is_sentence_rewrite ||
+      activeMicroLint.flagged_text.split(/\s+/).length > 2 ||
+      primarySuggestion.split(/\s+/).length > 3
+    );
 
     return (
-      <div className="fixed inset-0 w-full h-full p-1.5 flex items-center justify-center select-none font-sans antialiased text-slate-900">
-        <div className="bg-white text-slate-900 rounded-xl shadow-2xl border border-slate-200 w-64 p-3 flex flex-col gap-1.5 animate-fadeIn">
-          {/* Top line: Muted gray rule description */}
-          <div className="flex items-center justify-between text-xs text-slate-400 font-medium">
-            <span className="truncate pr-1">{getRuleDescription(activeMicroLint)}</span>
-            <button
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => handleDismissLint(activeMicroLint.id)}
-              title="Dismiss"
-              className="text-slate-400 hover:text-slate-600 transition-colors cursor-pointer p-0.5 shrink-0"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          </div>
+      <div
+        onMouseEnter={cancelHoverCollapse}
+        onMouseLeave={scheduleHoverCollapse}
+        className="fixed inset-0 w-full h-full p-1.5 flex items-center justify-center select-none font-sans antialiased text-slate-900"
+      >
+        <div className="bg-white text-slate-900 rounded-xl shadow-2xl border border-slate-200/90 w-full h-full p-2.5 flex flex-col justify-between animate-fadeIn">
+          {/* Header: Category dot + reason + < 1 of 3 > navigation */}
+          <div className="flex items-center justify-between border-b border-slate-100 pb-1.5">
+            <div className="flex items-center gap-1.5 min-w-0 pr-1">
+              <span className={`w-2 h-2 rounded-full shrink-0 ${getCategoryDotClass(activeMicroLint.category)}`} />
+              <span className="text-xs font-semibold text-slate-800 truncate" title={reasonHeader}>
+                {reasonHeader}
+              </span>
+            </div>
 
-          {/* Primary Action: Bold blue clickable suggestion */}
-          <div>
-            <button
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => handleAcceptSingleWord(activeMicroLint)}
-              title={`Replace "${activeMicroLint.flagged_text}" with "${primarySuggestion}"`}
-              className="text-base font-bold text-blue-600 hover:bg-blue-50 px-2 py-1 rounded-md cursor-pointer transition-colors inline-block -ml-2"
-            >
-              {primarySuggestion}
-            </button>
-          </div>
-
-          {/* Second Action: "Dismiss" row with a subtle trash icon */}
-          <div className="flex items-center justify-between pt-0.5">
-            <button
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => handleDismissLint(activeMicroLint.id)}
-              className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-800 cursor-pointer py-0.5 px-1 rounded transition-colors -ml-1"
-            >
-              <Trash2 className="w-3.5 h-3.5 text-slate-400" />
-              <span>Dismiss</span>
-            </button>
-
-            {activeMicroLint.category === "Correctness" && (
+            {/* Pagination < 1 of 3 > & Close */}
+            <div className="flex items-center gap-1 text-[11px] font-medium text-slate-500 shrink-0">
               <button
                 onMouseDown={(e) => e.preventDefault()}
-                onClick={() => handleAddToDictionary(activeMicroLint.flagged_text, activeMicroLint.id)}
-                title="Add to dictionary so it's never flagged again"
-                className="text-[11px] text-slate-500 hover:text-emerald-600 flex items-center gap-1 cursor-pointer transition-colors"
+                onClick={() => handleStepLint("prev")}
+                disabled={capturedLints.length <= 1}
+                title="Previous suggestion"
+                className="p-0.5 rounded hover:bg-slate-100 disabled:opacity-30 disabled:hover:bg-transparent cursor-pointer transition-colors"
               >
-                <BookMarked className="w-3 h-3" />
-                <span>+ Dict</span>
+                <ChevronLeft className="w-3.5 h-3.5" />
               </button>
+              <span className="tabular-nums font-mono text-[10px]">
+                {currentLintIndex + 1}/{Math.max(capturedLints.length, 1)}
+              </span>
+              <button
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => handleStepLint("next")}
+                disabled={capturedLints.length <= 1}
+                title="Next suggestion"
+                className="p-0.5 rounded hover:bg-slate-100 disabled:opacity-30 disabled:hover:bg-transparent cursor-pointer transition-colors"
+              >
+                <ChevronRight className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => handleDismissLint(activeMicroLint.id)}
+                title="Dismiss"
+                className="text-slate-400 hover:text-slate-600 p-0.5 ml-1 rounded hover:bg-slate-100 transition-colors cursor-pointer"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+
+          {/* Suggestion Body */}
+          <div className="flex-1 flex flex-col justify-center py-1">
+            {!isSentence ? (
+              /* Single-word error: crossed-out word + large primary blue replacement button */
+              <div className="flex flex-col gap-1.5 py-0.5">
+                <div className="flex items-center gap-1.5 text-xs text-slate-500">
+                  <span
+                    className="text-xs font-mono text-slate-600 bg-red-50 px-2 py-0.5 rounded border border-red-200 line-through decoration-red-500 decoration-2 shrink-0 max-w-[150px] truncate"
+                    title={activeMicroLint.flagged_text}
+                  >
+                    {activeMicroLint.flagged_text}
+                  </span>
+                  <ChevronRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                </div>
+                <button
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => handleAcceptSingleWord(activeMicroLint)}
+                  title={`Click to apply: "${primarySuggestion}"`}
+                  className="w-full text-left font-semibold text-blue-600 bg-blue-50/70 hover:bg-blue-100 px-3 py-2 rounded-lg transition cursor-pointer flex items-center justify-between group shadow-xs border border-blue-200/60"
+                >
+                  <span className="truncate text-xs font-bold text-blue-700">
+                    {primarySuggestion}
+                  </span>
+                  <CornerDownLeft className="w-3.5 h-3.5 text-blue-500 shrink-0 group-hover:translate-x-0.5 transition-transform" />
+                </button>
+              </div>
+            ) : (
+              /* Sentence-level issues: diff styling + clickable bold blue full-sentence replacement box */
+              <div className="flex flex-col gap-1 max-h-[86px] overflow-y-auto pr-0.5">
+                <div
+                  className="text-[11px] leading-snug bg-red-50/70 text-slate-600 border border-red-100 rounded px-2 py-1 line-through decoration-red-400 decoration-1 truncate"
+                  title={activeMicroLint.flagged_text}
+                >
+                  {activeMicroLint.flagged_text}
+                </div>
+                <button
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => handleAcceptSingleWord(activeMicroLint)}
+                  title="Click to replace sentence in-place"
+                  className="w-full text-left font-semibold text-blue-600 bg-blue-50/70 hover:bg-blue-100 px-3 py-2 rounded-lg transition cursor-pointer flex items-center justify-between group shadow-xs border border-blue-200/60"
+                >
+                  <div className="flex-1 min-w-0 pr-2">
+                    <div className="flex items-center justify-between text-[9px] text-blue-500 font-bold uppercase tracking-wider mb-0.5">
+                      <span>Rewrite in-place</span>
+                    </div>
+                    <div className="text-blue-900 font-semibold text-xs leading-snug line-clamp-2">
+                      {primarySuggestion}
+                    </div>
+                  </div>
+                  <CornerDownLeft className="w-3.5 h-3.5 text-blue-500 shrink-0 group-hover:translate-x-0.5 transition-transform" />
+                </button>
+              </div>
             )}
           </div>
 
-          {/* Bottom Action: "See more in Nishikanto" row with Nishikanto's mini icon */}
-          <button
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={handleExpandToFull}
-            className="flex items-center justify-between text-xs text-slate-600 hover:bg-slate-100 border-t border-slate-100 pt-2 mt-1 -mx-1 px-1.5 py-1 rounded cursor-pointer transition-colors"
-          >
-            <span className="flex items-center gap-1.5 font-medium">
-              <div className="w-4 h-4 rounded-md bg-gradient-to-tr from-indigo-500 to-purple-600 flex items-center justify-center shadow-xs">
-                <Sparkles className="w-2.5 h-2.5 text-white" />
-              </div>
-              <span>See more in Nishikanto</span>
-            </span>
-            <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
-          </button>
+          {/* Footer Actions */}
+          <div className="flex items-center justify-between pt-1 border-t border-slate-100 text-xs">
+            <div className="flex items-center gap-2">
+              <button
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => handleDismissLint(activeMicroLint.id)}
+                className="flex items-center gap-1 text-[11px] text-slate-400 hover:text-slate-700 cursor-pointer transition-colors"
+                title="Dismiss this suggestion"
+              >
+                <Trash2 className="w-3 h-3" />
+                <span>Dismiss</span>
+              </button>
+              {activeMicroLint.category === "Correctness" && !isSentence && (
+                <button
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => handleAddToDictionary(activeMicroLint.flagged_text, activeMicroLint.id)}
+                  title="Add to personal dictionary"
+                  className="text-[11px] text-slate-400 hover:text-emerald-600 flex items-center gap-0.5 cursor-pointer transition-colors"
+                >
+                  <BookMarked className="w-3 h-3" />
+                  <span>+ Dict</span>
+                </button>
+              )}
+            </div>
+
+            <button
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={handleExpandToFull}
+              className="flex items-center gap-1 text-[11px] font-medium text-slate-500 hover:text-indigo-600 transition-colors cursor-pointer"
+            >
+              <Sparkles className="w-3 h-3 text-indigo-500" />
+              <span>Open Assistant</span>
+            </button>
+          </div>
         </div>
       </div>
     );

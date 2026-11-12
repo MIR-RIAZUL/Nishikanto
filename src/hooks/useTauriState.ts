@@ -95,6 +95,14 @@ export function useTauriState() {
     }
   }, []);
 
+  const expandPillToMicro = useCallback(async () => {
+    try {
+      await invoke("expand_pill_to_micro");
+    } catch (e) {
+      console.warn("Could not invoke expand_pill_to_micro:", e);
+    }
+  }, []);
+
   const collapseWidget = useCallback(async () => {
     try {
       await invoke("collapse_widget");
@@ -125,18 +133,21 @@ export function useTauriState() {
       end: number,
       replacement: string,
       fullTextFallback: string,
-      lintId: string
+      lintId: string,
+      originalSpan?: string
     ) => {
       try {
-        await invoke("replace_single_word", {
+        return await invoke<string>("replace_single_word", {
           start,
           end,
           replacement,
           fullTextFallback,
           lintId,
+          originalSpan: originalSpan || null,
         });
       } catch (e) {
         console.warn("Could not invoke replace_single_word:", e);
+        return null;
       }
     },
     []
@@ -172,6 +183,7 @@ export function useTauriState() {
     setWidgetHeight,
     setWidgetSize,
     expandWidget,
+    expandPillToMicro,
     collapseWidget,
     hideWidget,
     replaceActiveText,

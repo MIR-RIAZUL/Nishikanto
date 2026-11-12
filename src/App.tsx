@@ -2,7 +2,6 @@ import { useEffect } from "react";
 import { useTauriState } from "./hooks/useTauriState";
 import { MainWindow } from "./components/MainWindow";
 import { WidgetWindow } from "./components/WidgetWindow";
-import { UnderlinesWindow } from "./components/UnderlinesWindow";
 import { getDb } from "./services/db";
 
 export default function App() {
@@ -10,27 +9,17 @@ export default function App() {
 
   // Initialize SQLite database and sync with Rust engine on startup
   useEffect(() => {
-    if (windowLabel !== "underlines") {
-      getDb().catch((e) => {
-        console.warn("Database initialization:", e);
-      });
-    }
-  }, [windowLabel]);
+    getDb().catch((e) => {
+      console.warn("Database initialization:", e);
+    });
+  }, []);
 
   // Route based on Tauri window label or query param
   const isWidget = windowLabel === "widget";
-  const isUnderlines = windowLabel === "underlines";
-  const isTransparent = isWidget || isUnderlines;
 
   return (
-    <div className={`w-full h-full ${isTransparent ? "bg-transparent" : "bg-slate-950"}`}>
-      {isUnderlines ? (
-        <UnderlinesWindow />
-      ) : isWidget ? (
-        <WidgetWindow />
-      ) : (
-        <MainWindow />
-      )}
+    <div className={`w-full h-full ${isWidget ? "bg-transparent" : "bg-slate-950"}`}>
+      {isWidget ? <WidgetWindow /> : <MainWindow />}
 
       {/* Browser dev switcher (only visible when testing directly in Vite browser outside Tauri) */}
       {!isTauri && (
@@ -42,13 +31,13 @@ export default function App() {
           <button
             onClick={() => {
               const url = new URL(window.location.href);
-              const next = isUnderlines ? "main" : isWidget ? "underlines" : "widget";
+              const next = isWidget ? "main" : "widget";
               url.searchParams.set("window", next);
               window.location.href = url.toString();
             }}
             className="px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white font-medium cursor-pointer transition-colors"
           >
-            Switch to {isUnderlines ? "Main Window" : isWidget ? "Underlines" : "Widget"}
+            Switch to {isWidget ? "Main Window" : "Widget"}
           </button>
         </aside>
       )}
