@@ -11,7 +11,6 @@ import {
   EyeOff,
   Plus,
   Trash2,
-  RefreshCw,
   Zap,
   Laptop,
 } from "lucide-react";
@@ -128,32 +127,48 @@ export function SettingsView() {
 
   // Save API Key
   const handleSaveApiKey = async () => {
+    if (!apiKey.trim()) return;
     await saveSetting("gemini_api_key", apiKey.trim());
-    setKeyStatus({ tested: false });
+    setKeyStatus({
+      tested: true,
+      success: true,
+      message: "API key saved locally to SQLite.",
+    });
   };
 
-  // Test API Key
+  // Save & Test API Key
   const handleTestApiKey = async () => {
+    const trimmed = apiKey.trim();
+    if (!trimmed) {
+      setKeyStatus({
+        tested: true,
+        success: false,
+        message: "Please enter a Gemini API key first.",
+      });
+      return;
+    }
+
     setIsTestingKey(true);
     setKeyStatus({ tested: false });
     try {
+      // 1. Immediately save key to SQLite & update Rust memory state
+      await saveSetting("gemini_api_key", trimmed);
+
+      // 2. Perform lightweight generateContent ping with {"contents":[{"parts":[{"text":"Hi"}]}]}
       const res = await invoke<{
         success: boolean;
         status: string;
         latency_ms?: number;
+        model?: string;
         message?: string;
-      }>("test_gemini_connection", { apiKey: apiKey.trim() || null });
+      }>("test_gemini_connection", { apiKey: trimmed });
 
       setKeyStatus({
         tested: true,
         success: res.success,
         latency: res.latency_ms,
-        message: res.message || "Connection verified successfully!",
+        message: res.message || `Connected to ${res.model || "Gemini AI"} successfully!`,
       });
-
-      if (res.success && apiKey.trim()) {
-        await saveSetting("gemini_api_key", apiKey.trim());
-      }
     } catch (e: any) {
       setKeyStatus({
         tested: true,
@@ -249,7 +264,7 @@ export function SettingsView() {
               <span>Gemini AI Key (Cloud Tier)</span>
             </div>
             <p className="text-xs text-slate-400 mt-1 leading-relaxed">
-              Powers tone scoring and context rewrites with <span className="text-indigo-300 font-mono">gemini-2.5-flash-lite</span>. If omitted, the offline Harper engine operates standalone.
+              Powers tone scoring and context rewrites with <span className="text-indigo-300 font-mono">gemini-3.5-flash-lite</span> (supports standard and <span className="text-indigo-300 font-mono">AQ.</span> formats). If omitted, the offline Harper engine operates standalone.
             </p>
 
             <div className="mt-3 relative">
@@ -257,7 +272,7 @@ export function SettingsView() {
                 type={showKey ? "text" : "password"}
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
-                placeholder="AIzaSy..."
+                placeholder="AIzaSy... or AQ...."
                 className="w-full px-3 py-2 text-xs font-mono rounded-xl bg-slate-950 border border-white/10 focus:border-indigo-500 focus:outline-none pr-9 text-slate-100"
               />
               <button
@@ -272,44 +287,47 @@ export function SettingsView() {
             {/* Test result status badge */}
             {keyStatus.tested && (
               <div
-                className={`mt-2.5 p-2 rounded-xl text-xs flex items-center gap-2 border ${
+                className={`mt-2.5 p-2.5 rounded-xl text-xs flex items-start gap-2 border break-words ${
                   keyStatus.success
                     ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300"
                     : "bg-red-500/10 border-red-500/30 text-red-300"
                 }`}
               >
                 {keyStatus.success ? (
-                  <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+                  <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400 mt-0.5" />
                 ) : (
-                  <AlertCircle className="w-4 h-4 shrink-0 text-red-400" />
+                  <AlertCircle className="w-4 h-4 shrink-0 text-red-400 mt-0.5" />
                 )}
-                <span className="truncate">
-                  {keyStatus.success
-                    ? `Connected (${keyStatus.latency}ms latency)`
-                    : keyStatus.message}
-                </span>
+                <div className="flex-1 overflow-hidden">
+                  <p className="font-semibold">
+                    {keyStatus.success ? "Gemini Connection Verified" : "Gemini Connection Error"}
+                  </p>
+                  <p className="text-[11px] opacity-90 mt-0.5 font-mono break-all leading-normal">
+                    {keyStatus.message}
+                  </p>
+                </div>
               </div>
             )}
           </div>
 
           <div className="flex items-center gap-2 pt-2 border-t border-white/5">
             <button
-              onClick={handleSaveApiKey}
-              className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold transition-colors cursor-pointer"
-            >
-              Save Key
-            </button>
-            <button
               onClick={handleTestApiKey}
               disabled={isTestingKey}
-              className="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-slate-200 text-xs font-medium flex items-center gap-1.5 transition-colors disabled:opacity-40 cursor-pointer"
+              className="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors disabled:opacity-40 cursor-pointer shadow-sm"
             >
               {isTestingKey ? (
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
               ) : (
-                <RefreshCw className="w-3.5 h-3.5" />
+                <Zap className="w-3.5 h-3.5" />
               )}
-              <span>Test Connection</span>
+              <span>Save &amp; Test Key</span>
+            </button>
+            <button
+              onClick={handleSaveApiKey}
+              className="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-slate-300 hover:text-white text-xs font-medium transition-colors cursor-pointer"
+            >
+              Save Only
             </button>
           </div>
         </div>

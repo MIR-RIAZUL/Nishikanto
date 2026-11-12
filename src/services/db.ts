@@ -214,7 +214,7 @@ export async function saveSetting(key: string, value: string): Promise<void> {
       [key, value]
     );
     if (key === "gemini_api_key") {
-      await invoke("set_custom_api_key", { key });
+      await invoke("set_custom_api_key", { key: value });
     }
   } catch (e) {
     console.warn(`Could not save setting ${key}:`, e);

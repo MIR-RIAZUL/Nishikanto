@@ -315,17 +315,19 @@ async fn analyze_with_gemini(
         }
     });
 
-    let models = ["gemini-3.5-flash-lite", "gemini-2.5-flash-lite", "gemini-2.0-flash"];
+    let models = ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-2.5-flash-lite"];
     let mut last_error = String::new();
 
     for model_name in models {
         let endpoint = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+            "https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
         );
 
         let res = match state
             .http_client
             .post(&endpoint)
+            .header("x-goog-api-key", api_key.trim())
+            .header("Content-Type", "application/json")
             .json(&body)
             .send()
             .await
@@ -349,7 +351,8 @@ async fn analyze_with_gemini(
         }
 
         if res.status() == reqwest::StatusCode::NOT_FOUND {
-            last_error = format!("Model {model_name} returned 404");
+            let text_err = res.text().await.unwrap_or_default();
+            last_error = format!("Model {model_name} returned 404: {text_err}");
             continue;
         }
 
@@ -795,45 +798,66 @@ async fn test_gemini_connection(
     }
 
     let start = std::time::Instant::now();
-    let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key={}",
-        key.trim()
-    );
+    let models = ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-2.5-flash-lite"];
 
     let body = serde_json::json!({
         "contents": [{
-            "parts": [{ "text": "Ping connection test: respond with OK" }]
+            "parts": [{ "text": "Hi" }]
         }]
     });
 
-    let resp = state
-        .http_client
-        .post(&url)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("Network request failed: {}", e))?;
+    let mut last_status = 0;
+    let mut last_error_msg = String::new();
 
-    let status = resp.status().as_u16();
-    let latency_ms = start.elapsed().as_millis();
+    for model_name in models {
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+        );
 
-    if status == 200 {
-        Ok(serde_json::json!({
-            "success": true,
-            "status": "connected",
-            "latency_ms": latency_ms,
-            "model": "gemini-2.5-flash-lite"
-        }))
-    } else if status == 429 {
-        Ok(serde_json::json!({
-            "success": false,
-            "status": "rate_limited",
-            "message": "Free tier quota exceeded (HTTP 429)."
-        }))
-    } else {
-        let err_text = resp.text().await.unwrap_or_default();
-        Err(format!("API error HTTP {}: {}", status, err_text))
+        let resp = match state
+            .http_client
+            .post(&url)
+            .header("x-goog-api-key", key.trim())
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                return Err(format!("Network request failed: {e}"));
+            }
+        };
+
+        let status = resp.status().as_u16();
+        last_status = status;
+
+        if status == 200 {
+            let latency_ms = start.elapsed().as_millis();
+            return Ok(serde_json::json!({
+                "success": true,
+                "status": "connected",
+                "latency_ms": latency_ms,
+                "model": model_name,
+                "message": format!("Successfully connected to {model_name} ({latency_ms}ms)")
+            }));
+        } else if status == 429 {
+            return Ok(serde_json::json!({
+                "success": false,
+                "status": "rate_limited",
+                "message": "Free tier quota exceeded (HTTP 429)."
+            }));
+        } else if status == 404 {
+            let err_text = resp.text().await.unwrap_or_default();
+            last_error_msg = format!("HTTP 404 Not Found for {model_name}: {err_text}");
+            continue;
+        } else {
+            let err_text = resp.text().await.unwrap_or_default();
+            return Err(format!("Gemini API error (HTTP {status}): {err_text}"));
+        }
     }
+
+    Err(format!("Gemini API error (HTTP {last_status}): {last_error_msg}"))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
