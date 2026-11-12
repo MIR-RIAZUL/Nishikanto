@@ -8,6 +8,7 @@
     "opener:default",
     "global-shortcut:default",
     "sql:default",
+    "sql:allow-execute",
     "autostart:default"
   ]
 }

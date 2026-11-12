@@ -496,7 +496,6 @@ pub fn trigger_os_capture_and_show(app: &tauri::AppHandle) -> Result<os_bridge::
     };
 
     if is_excluded {
-        println!("Application '{}' ({}) is excluded. Hiding widget.", context.source_app, context.process_name);
         if let Some(widget_win) = app.get_webview_window("widget") {
             let _ = widget_win.hide();
         }
