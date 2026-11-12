@@ -78,6 +78,38 @@ export function useTauriState() {
     }
   }, []);
 
+  const setWidgetSize = useCallback(async (width: number, height: number) => {
+    try {
+      await invoke("set_widget_size", { width, height });
+    } catch {
+      // fallback in browser
+    }
+  }, []);
+
+  const expandWidget = useCallback(async () => {
+    try {
+      await invoke("expand_widget");
+    } catch (e) {
+      console.warn("Could not invoke expand_widget:", e);
+    }
+  }, []);
+
+  const collapseWidget = useCallback(async () => {
+    try {
+      await invoke("collapse_widget");
+    } catch (e) {
+      console.warn("Could not invoke collapse_widget:", e);
+    }
+  }, []);
+
+  const hideWidget = useCallback(async () => {
+    try {
+      await invoke("hide_widget");
+    } catch (e) {
+      console.warn("Could not invoke hide_widget:", e);
+    }
+  }, []);
+
   const replaceActiveText = useCallback(async (newText: string) => {
     try {
       await invoke("replace_active_text", { newText });
@@ -103,6 +135,10 @@ export function useTauriState() {
     openMainEditor,
     hideMainEditor,
     setWidgetHeight,
+    setWidgetSize,
+    expandWidget,
+    collapseWidget,
+    hideWidget,
     replaceActiveText,
     captureActiveText,
   };

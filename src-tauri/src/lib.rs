@@ -452,8 +452,8 @@ pub fn trigger_os_capture_and_show(app: &tauri::AppHandle) -> Result<os_bridge::
 
     // Calculate smart positioning (beside or just below the active text box)
     if let Some(widget_win) = app.get_webview_window("widget") {
-        let mut target_x = context.bounds.x;
-        let mut target_y = context.bounds.y + context.bounds.height + 8.0;
+        let mut target_x = context.bounds.x + context.bounds.width + 8.0;
+        let mut target_y = context.bounds.y + (context.bounds.height / 2.0) - 26.0;
 
         if let Ok(Some(monitor)) = widget_win.current_monitor() {
             let m_size = monitor.size();
@@ -461,16 +461,17 @@ pub fn trigger_os_capture_and_show(app: &tauri::AppHandle) -> Result<os_bridge::
             let screen_w = m_size.width as f64 / scale;
             let screen_h = m_size.height as f64 / scale;
 
-            target_x = target_x.clamp(16.0, (screen_w - 356.0).max(16.0));
-
-            if target_y + 360.0 > screen_h {
-                target_y = (context.bounds.y - 368.0).max(16.0);
+            if target_x + 60.0 > screen_w {
+                target_x = (context.bounds.x - 60.0).max(12.0);
             } else {
-                target_y = target_y.clamp(16.0, (screen_h - 368.0).max(16.0));
+                target_x = target_x.clamp(12.0, (screen_w - 60.0).max(12.0));
             }
+
+            target_y = target_y.clamp(12.0, (screen_h - 60.0).max(12.0));
         }
 
         let _ = widget_win.set_position(tauri::Position::Logical(LogicalPosition::new(target_x, target_y)));
+        let _ = widget_win.set_size(LogicalSize::new(52.0, 52.0));
         let _ = widget_win.show();
     }
 
@@ -490,10 +491,65 @@ pub fn trigger_os_capture_and_show(app: &tauri::AppHandle) -> Result<os_bridge::
 #[tauri::command]
 fn replace_active_text(app: tauri::AppHandle, new_text: String) -> Result<(), String> {
     os_bridge::replace_active_text(&new_text)?;
+    // Collapse to compact pill upon applying replacement
+    if let Some(widget_win) = app.get_webview_window("widget") {
+        let _ = widget_win.set_size(LogicalSize::new(52.0, 52.0));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn expand_widget(app: tauri::AppHandle) {
+    if let Some(widget_win) = app.get_webview_window("widget") {
+        if let Ok(pos) = widget_win.outer_position() {
+            if let Ok(Some(monitor)) = widget_win.current_monitor() {
+                let m_pos = monitor.position();
+                let m_size = monitor.size();
+                let scale = monitor.scale_factor();
+
+                let cur_x = pos.x as f64 / scale;
+                let cur_y = pos.y as f64 / scale;
+                let mon_x = m_pos.x as f64 / scale;
+                let mon_y = m_pos.y as f64 / scale;
+                let mon_w = m_size.width as f64 / scale;
+                let mon_h = m_size.height as f64 / scale;
+
+                let max_x = mon_x + mon_w - 350.0;
+                let max_y = mon_y + mon_h - 430.0;
+
+                let adjusted_x = cur_x.clamp(mon_x + 8.0, max_x.max(mon_x + 8.0));
+                let adjusted_y = cur_y.clamp(mon_y + 8.0, max_y.max(mon_y + 8.0));
+
+                if (adjusted_x - cur_x).abs() > 1.0 || (adjusted_y - cur_y).abs() > 1.0 {
+                    let _ = widget_win.set_position(tauri::Position::Logical(LogicalPosition::new(adjusted_x, adjusted_y)));
+                }
+            }
+        }
+        let _ = widget_win.set_size(LogicalSize::new(340.0, 420.0));
+    }
+}
+
+#[tauri::command]
+fn collapse_widget(app: tauri::AppHandle) {
+    if let Some(widget_win) = app.get_webview_window("widget") {
+        let _ = widget_win.set_size(LogicalSize::new(52.0, 52.0));
+    }
+}
+
+#[tauri::command]
+fn hide_widget(app: tauri::AppHandle) {
     if let Some(widget_win) = app.get_webview_window("widget") {
         let _ = widget_win.hide();
     }
-    Ok(())
+}
+
+#[tauri::command]
+fn set_widget_size(app: tauri::AppHandle, width: f64, height: f64) {
+    if let Some(widget_win) = app.get_webview_window("widget") {
+        let w = width.clamp(40.0, 500.0);
+        let h = height.clamp(40.0, 600.0);
+        let _ = widget_win.set_size(LogicalSize::new(w, h));
+    }
 }
 
 #[tauri::command]
@@ -668,7 +724,11 @@ pub fn run() {
             toggle_pause_state,
             show_main_window,
             hide_main_window,
-            set_widget_height
+            set_widget_height,
+            set_widget_size,
+            expand_widget,
+            collapse_widget,
+            hide_widget
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

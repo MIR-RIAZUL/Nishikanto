@@ -19,6 +19,7 @@ pub struct CapturedContext {
 #[cfg(windows)]
 mod platform {
     use super::*;
+    use std::sync::atomic::{AtomicIsize, Ordering};
     use std::time::Duration;
     use windows::core::BSTR;
     use windows::Win32::System::Com::*;
@@ -26,6 +27,8 @@ mod platform {
     use windows_sys::Win32::Foundation::*;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
+
+    static LAST_FOREGROUND_HWND: AtomicIsize = AtomicIsize::new(0);
 
     pub fn simulate_key_combination(ctrl_or_cmd: u16, key: u16) {
         unsafe {
@@ -64,6 +67,8 @@ mod platform {
                 );
             }
 
+            LAST_FOREGROUND_HWND.store(hwnd as isize, Ordering::SeqCst);
+
             let mut title_buf = [0u16; 512];
             let len = GetWindowTextW(hwnd, title_buf.as_mut_ptr(), 512);
             let title = if len > 0 {
@@ -88,6 +93,10 @@ mod platform {
 
     pub fn capture_via_accessibility() -> Option<CapturedContext> {
         unsafe {
+            let hwnd = GetForegroundWindow();
+            if !hwnd.is_null() {
+                LAST_FOREGROUND_HWND.store(hwnd as isize, Ordering::SeqCst);
+            }
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
             let automation: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
             let focused = automation.GetFocusedElement().ok()?;
@@ -199,6 +208,14 @@ mod platform {
     }
 
     pub fn replace_active_text(new_text: &str) -> Result<(), String> {
+        let saved_hwnd = LAST_FOREGROUND_HWND.load(Ordering::SeqCst);
+        if saved_hwnd != 0 {
+            unsafe {
+                SetForegroundWindow(saved_hwnd as HWND);
+                std::thread::sleep(Duration::from_millis(30));
+            }
+        }
+
         // Try ValuePattern SetValue first
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
