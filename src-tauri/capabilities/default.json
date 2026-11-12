@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capabilities for Nishikanto windows",
-  "windows": ["main", "widget"],
+  "windows": ["main", "widget", "underlines"],
   "permissions": [
     "core:default",
     "opener:default",

@@ -23,6 +23,7 @@ pub struct LocalLintResult {
     pub subcategory: String,
     pub message: String,
     pub suggestions: Vec<String>,
+    pub screen_bounds: Option<os_bridge::ScreenRect>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,6 +152,7 @@ fn detect_clarity_patterns(text: &str) -> Vec<LocalLintResult> {
                 subcategory: subcat.to_string(),
                 message: explanation.to_string(),
                 suggestions: suggestions.clone(),
+                screen_bounds: None,
             });
 
             start_search = actual_byte_end;
@@ -213,6 +215,7 @@ fn check_text_local(
             subcategory,
             message: lint.message,
             suggestions,
+            screen_bounds: None,
         });
     }
 
@@ -427,11 +430,94 @@ async fn analyze_with_gemini(
     })
 }
 
+fn calculate_smart_pill_position(
+    bounds: &os_bridge::ScreenRect,
+    widget_win: &tauri::WebviewWindow,
+) -> (f64, f64) {
+    let (mon_x, mon_y, mon_w, mon_h, scale) = if let Ok(Some(mon)) = widget_win.current_monitor() {
+        let p = mon.position();
+        let s = mon.size();
+        let sf = mon.scale_factor();
+        (
+            p.x as f64 / sf,
+            p.y as f64 / sf,
+            s.width as f64 / sf,
+            s.height as f64 / sf,
+            sf,
+        )
+    } else {
+        (0.0, 0.0, 1920.0, 1080.0, 1.0)
+    };
+
+    let sf = if scale > 0.0 { scale } else { 1.0 };
+    let box_x = bounds.x / sf;
+    let box_y = bounds.y / sf;
+    let box_w = bounds.width / sf;
+    let box_h = bounds.height / sf;
+    let box_right = box_x + box_w;
+    let box_bottom = box_y + box_h;
+
+    let pill_size = 52.0;
+
+    // Anchor the floating pill cleanly outside the bottom-right corner:
+    // (x = box.right - 44, y = box.bottom + 8)
+    let mut target_x = box_right - 44.0;
+    let mut target_y = box_bottom + 8.0;
+
+    // If bottom overflows the visible monitor (e.g. chat text box docked at bottom):
+    if target_y + pill_size > mon_y + mon_h - 8.0 {
+        // Try vertically centered on far-right edge outside the text box:
+        if box_right + pill_size + 8.0 <= mon_x + mon_w {
+            target_x = box_right + 8.0;
+            target_y = (box_y + (box_h / 2.0)) - (pill_size / 2.0);
+        } else {
+            // If right edge also overflows, place above top-right corner of text box:
+            target_x = box_right - 44.0;
+            target_y = box_y - pill_size - 8.0;
+        }
+    }
+
+    // Clamp within monitor visible boundaries
+    let min_x = mon_x + 8.0;
+    let max_x = (mon_x + mon_w - pill_size - 8.0).max(min_x);
+    let min_y = mon_y + 8.0;
+    let max_y = (mon_y + mon_h - pill_size - 8.0).max(min_y);
+
+    (target_x.clamp(min_x, max_x), target_y.clamp(min_y, max_y))
+}
+
+fn update_underlines_window(app: &tauri::AppHandle, lints: &[LocalLintResult]) {
+    let has_bounds = lints.iter().any(|l| l.screen_bounds.is_some());
+    if let Some(underlines_win) = app.get_webview_window("underlines") {
+        if has_bounds {
+            let _ = underlines_win.set_ignore_cursor_events(true);
+            if !underlines_win.is_visible().unwrap_or(false) {
+                let _ = underlines_win.show();
+            }
+            let _ = app.emit("os-underlines-updated", lints);
+        } else {
+            if underlines_win.is_visible().unwrap_or(false) {
+                let _ = underlines_win.hide();
+            }
+            let _ = app.emit("os-underlines-cleared", ());
+        }
+    }
+}
+
+fn clear_underlines_window(app: &tauri::AppHandle) {
+    if let Some(underlines_win) = app.get_webview_window("underlines") {
+        if underlines_win.is_visible().unwrap_or(false) {
+            let _ = underlines_win.hide();
+        }
+    }
+    let _ = app.emit("os-underlines-cleared", ());
+}
+
 pub fn trigger_os_capture_and_show(app: &tauri::AppHandle) -> Result<os_bridge::CapturedContext, String> {
     let context = os_bridge::capture_active_context();
 
     // Check lints on captured text if non-empty
-    let lints = if !context.text.trim().is_empty() {
+    let mut lints = if !context.text.trim().is_empty() {
         if let Some(state) = app.try_state::<Arc<AppState>>() {
             let doc = Document::new_markdown_default_curated(&context.text);
             if let Ok(mut lg) = state.lint_group.lock() {
@@ -465,6 +551,7 @@ pub fn trigger_os_capture_and_show(app: &tauri::AppHandle) -> Result<os_bridge::
                             subcategory: subcat,
                             message: lint.message,
                             suggestions,
+                            screen_bounds: None,
                         });
                     }
                 }
@@ -502,28 +589,27 @@ pub fn trigger_os_capture_and_show(app: &tauri::AppHandle) -> Result<os_bridge::
         if let Some(widget_win) = app.get_webview_window("widget") {
             let _ = widget_win.hide();
         }
+        clear_underlines_window(app);
         return Ok(context);
     }
 
-    // Calculate smart positioning (beside or just below the active text box)
+    // Extract exact screen bounds for each lint from UIA text range
     if let Some(widget_win) = app.get_webview_window("widget") {
-        let mut target_x = context.bounds.x + context.bounds.width + 8.0;
-        let mut target_y = context.bounds.y + (context.bounds.height / 2.0) - 26.0;
+        let sf = widget_win
+            .current_monitor()
+            .ok()
+            .flatten()
+            .map(|m| m.scale_factor())
+            .unwrap_or(1.0);
+        os_bridge::extract_lint_screen_rects(&mut lints, &context.bounds, sf);
+    }
 
-        if let Ok(Some(monitor)) = widget_win.current_monitor() {
-            let m_size = monitor.size();
-            let scale = monitor.scale_factor();
-            let screen_w = m_size.width as f64 / scale;
-            let screen_h = m_size.height as f64 / scale;
+    // Update underlines overlay window
+    update_underlines_window(app, &lints);
 
-            if target_x + 60.0 > screen_w {
-                target_x = (context.bounds.x - 60.0).max(12.0);
-            } else {
-                target_x = target_x.clamp(12.0, (screen_w - 60.0).max(12.0));
-            }
-
-            target_y = target_y.clamp(12.0, (screen_h - 60.0).max(12.0));
-        }
+    // Calculate smart positioning cleanly outside bottom-right corner or right edge
+    if let Some(widget_win) = app.get_webview_window("widget") {
+        let (target_x, target_y) = calculate_smart_pill_position(&context.bounds, &widget_win);
 
         let _ = widget_win.set_position(tauri::Position::Logical(LogicalPosition::new(target_x, target_y)));
         let _ = widget_win.set_size(LogicalSize::new(52.0, 52.0));
@@ -552,6 +638,7 @@ fn replace_active_text(
 ) -> Result<(), String> {
     state.widget_expanded.store(false, Ordering::SeqCst);
     os_bridge::replace_active_text(&new_text)?;
+    clear_underlines_window(&app);
     // Collapse to compact pill upon applying replacement
     if let Some(widget_win) = app.get_webview_window("widget") {
         let _ = widget_win.set_size(LogicalSize::new(52.0, 52.0));
@@ -602,6 +689,7 @@ fn collapse_widget(app: tauri::AppHandle, state: State<Arc<AppState>>) {
 #[tauri::command]
 fn hide_widget(app: tauri::AppHandle, state: State<Arc<AppState>>) {
     state.widget_expanded.store(false, Ordering::SeqCst);
+    clear_underlines_window(&app);
     if let Some(widget_win) = app.get_webview_window("widget") {
         let _ = widget_win.hide();
     }
@@ -630,6 +718,12 @@ fn get_pause_state(state: State<Arc<AppState>>) -> bool {
 fn toggle_pause_state(app: tauri::AppHandle, state: State<Arc<AppState>>) -> bool {
     let next = !state.paused.load(Ordering::SeqCst);
     state.paused.store(next, Ordering::SeqCst);
+    if next {
+        clear_underlines_window(&app);
+        if let Some(widget_win) = app.get_webview_window("widget") {
+            let _ = widget_win.hide();
+        }
+    }
     let _ = app.emit("pause-status-changed", next);
     next
 }
@@ -974,6 +1068,12 @@ pub fn run() {
                             state_for_tray.paused.store(next, Ordering::SeqCst);
                             let _ = pause_item_handle.set_checked(next);
                             let _ = pause_item_handle.set_text(if next { "Resume Nishikanto" } else { "Pause Nishikanto" });
+                            if next {
+                                clear_underlines_window(app);
+                                if let Some(widget_win) = app.get_webview_window("widget") {
+                                    let _ = widget_win.hide();
+                                }
+                            }
                             let _ = app.emit("pause-status-changed", next);
                         }
                         "quit" => {
@@ -995,6 +1095,10 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+
+            if let Some(underlines_win) = app.get_webview_window("underlines") {
+                let _ = underlines_win.set_ignore_cursor_events(true);
+            }
 
             // Real-time 500ms debounced typing watcher with focus guard & desktop auto-hide
             let watcher_app = app.handle().clone();
@@ -1042,6 +1146,7 @@ pub fn run() {
                                 let _ = widget_win.hide();
                             }
                         }
+                        clear_underlines_window(&watcher_app);
                         last_text.clear();
                         continue;
                     }
@@ -1065,6 +1170,7 @@ pub fn run() {
                                 let _ = widget_win.hide();
                             }
                         }
+                        clear_underlines_window(&watcher_app);
                         last_text.clear();
                         continue;
                     }
@@ -1078,12 +1184,16 @@ pub fn run() {
                         let window_switched = win_state.hwnd_val != last_hwnd;
 
                         if text_changed || bounds_changed || window_switched {
+                            if window_switched {
+                                clear_underlines_window(&watcher_app);
+                            }
+
                             last_text = ctx.text.clone();
                             last_bounds = ctx.bounds.clone();
                             last_hwnd = win_state.hwnd_val;
 
                             // Run local Harper check (<5ms)
-                            let lints = if !ctx.text.trim().is_empty() {
+                            let mut lints = if !ctx.text.trim().is_empty() {
                                 let doc = Document::new_markdown_default_curated(&ctx.text);
                                 if let Ok(mut lg) = watcher_state.lint_group.lock() {
                                     let mut raw_lints = lg.lint(&doc);
@@ -1123,6 +1233,7 @@ pub fn run() {
                                                 subcategory: subcat,
                                                 message: lint.message,
                                                 suggestions,
+                                                screen_bounds: None,
                                             });
                                         }
                                     }
@@ -1142,6 +1253,20 @@ pub fn run() {
                                 Vec::new()
                             };
 
+                            // Extract exact word screen coordinates for in-place underlines
+                            if let Some(widget_win) = watcher_app.get_webview_window("widget") {
+                                let sf = widget_win
+                                    .current_monitor()
+                                    .ok()
+                                    .flatten()
+                                    .map(|m| m.scale_factor())
+                                    .unwrap_or(1.0);
+                                os_bridge::extract_lint_screen_rects(&mut lints, &ctx.bounds, sf);
+                            }
+
+                            // Update underlines overlay window
+                            update_underlines_window(&watcher_app, &lints);
+
                             let payload = OsCapturePayload {
                                 text: ctx.text.clone(),
                                 source_app: ctx.source_app.clone(),
@@ -1152,34 +1277,19 @@ pub fn run() {
                             };
                             let _ = watcher_app.emit("os-text-captured", payload);
 
-                            // Position widget beside the active text box
-                            if let Some(widget_win) = watcher_app.get_webview_window("widget") {
-                                let mut target_x = ctx.bounds.x + ctx.bounds.width + 8.0;
-                                let mut target_y =
-                                    ctx.bounds.y + (ctx.bounds.height / 2.0) - 26.0;
+                            // Position widget using smart pill positioning
+                            if !watcher_state.widget_expanded.load(Ordering::SeqCst) {
+                                if let Some(widget_win) = watcher_app.get_webview_window("widget") {
+                                    let (target_x, target_y) = calculate_smart_pill_position(&ctx.bounds, &widget_win);
 
-                                if let Ok(Some(monitor)) = widget_win.current_monitor() {
-                                    let m_size = monitor.size();
-                                    let scale = monitor.scale_factor();
-                                    let screen_w = m_size.width as f64 / scale;
-                                    let screen_h = m_size.height as f64 / scale;
-
-                                    if target_x + 60.0 > screen_w {
-                                        target_x = (ctx.bounds.x - 60.0).max(12.0);
-                                    } else {
-                                        target_x =
-                                            target_x.clamp(12.0, (screen_w - 60.0).max(12.0));
+                                    let _ = widget_win.set_position(tauri::Position::Logical(
+                                        LogicalPosition::new(target_x, target_y),
+                                    ));
+                                    if !widget_win.is_visible().unwrap_or(false)
+                                        && !ctx.text.trim().is_empty()
+                                    {
+                                        let _ = widget_win.show();
                                     }
-                                    target_y = target_y.clamp(12.0, (screen_h - 60.0).max(12.0));
-                                }
-
-                                let _ = widget_win.set_position(tauri::Position::Logical(
-                                    LogicalPosition::new(target_x, target_y),
-                                ));
-                                if !widget_win.is_visible().unwrap_or(false)
-                                    && !ctx.text.trim().is_empty()
-                                {
-                                    let _ = widget_win.show();
                                 }
                             }
                         }
@@ -1194,6 +1304,7 @@ pub fn run() {
                                     let _ = widget_win.hide();
                                 }
                             }
+                            clear_underlines_window(&watcher_app);
                             last_text.clear();
                         }
                     }

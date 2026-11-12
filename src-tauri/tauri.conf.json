@@ -38,6 +38,19 @@
         "skipTaskbar": true,
         "shadow": false,
         "url": "index.html?window=widget"
+      },
+      {
+        "label": "underlines",
+        "title": "Nishikanto Underlines",
+        "fullscreen": true,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "focusable": false,
+        "skipTaskbar": true,
+        "shadow": false,
+        "visible": false,
+        "url": "index.html?window=underlines"
       }
     ],
     "security": {

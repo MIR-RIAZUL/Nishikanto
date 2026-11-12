@@ -31,6 +31,7 @@ mod platform {
     use std::time::Duration;
     use windows::core::BSTR;
     use windows::Win32::System::Com::*;
+    use windows::Win32::System::Ole::*;
     use windows::Win32::UI::Accessibility::*;
     use windows_sys::Win32::Foundation::*;
     use windows_sys::Win32::System::Threading::*;
@@ -269,6 +270,86 @@ mod platform {
         }
     }
 
+    pub fn extract_lint_screen_rects(
+        lints: &mut [crate::LocalLintResult],
+        box_bounds: &ScreenRect,
+        scale_factor: f64,
+    ) {
+        if lints.is_empty() {
+            return;
+        }
+
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let automation: IUIAutomation = match CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) {
+                Ok(a) => a,
+                Err(_) => return,
+            };
+            let focused = match automation.GetFocusedElement() {
+                Ok(f) => f,
+                Err(_) => return,
+            };
+
+            if let Ok(text_pattern) = focused.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) {
+                if let Ok(doc_range) = text_pattern.DocumentRange() {
+                    let sf = if scale_factor > 0.0 { scale_factor } else { 1.0 };
+
+                    for lint in lints.iter_mut() {
+                        let len = lint.end.saturating_sub(lint.start);
+                        if len == 0 {
+                            continue;
+                        }
+
+                        if let Ok(word_range) = doc_range.Clone() {
+                            let _ = word_range.Move(TextUnit_Character, lint.start as i32);
+                            let _ = word_range.MoveEndpointByUnit(
+                                TextPatternRangeEndpoint_End,
+                                TextUnit_Character,
+                                len as i32,
+                            );
+
+                            if let Ok(sa) = word_range.GetBoundingRectangles() {
+                                let lbound = SafeArrayGetLBound(sa, 1).unwrap_or(0);
+                                let ubound = SafeArrayGetUBound(sa, 1).unwrap_or(-1);
+                                let count = if ubound >= lbound {
+                                    (ubound - lbound + 1) as usize
+                                } else {
+                                    0
+                                };
+
+                                if count >= 4 {
+                                    let mut data_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+                                    if SafeArrayAccessData(sa, &mut data_ptr).is_ok() {
+                                        let slice = std::slice::from_raw_parts(data_ptr as *const f64, count);
+                                        let phys_x = slice[0];
+                                        let phys_y = slice[1];
+                                        let phys_w = slice[2];
+                                        let phys_h = slice[3];
+                                        let _ = SafeArrayUnaccessData(sa);
+
+                                        // Ensure word is vertically inside input area (not scrolled out)
+                                        let visible = phys_y + phys_h >= box_bounds.y - 12.0
+                                            && phys_y <= box_bounds.y + box_bounds.height + 12.0;
+
+                                        if phys_w > 0.0 && phys_h > 0.0 && visible {
+                                            lint.screen_bounds = Some(ScreenRect {
+                                                x: phys_x / sf,
+                                                y: phys_y / sf,
+                                                width: phys_w / sf,
+                                                height: phys_h / sf,
+                                            });
+                                        }
+                                    }
+                                }
+                                let _ = SafeArrayDestroy(sa);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pub fn capture_active_context() -> CapturedContext {
         // First try UI Automation
         if let Some(ctx) = capture_via_accessibility() {
@@ -409,6 +490,13 @@ mod platform {
         }
     }
 
+    pub fn extract_lint_screen_rects(
+        _lints: &mut [crate::LocalLintResult],
+        _box_bounds: &ScreenRect,
+        _scale_factor: f64,
+    ) {
+    }
+
     pub fn replace_active_text(new_text: &str) -> Result<(), String> {
         let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
         let backup_text = clipboard.get_text().ok();
@@ -435,6 +523,7 @@ mod platform {
 pub use platform::{
     capture_active_context,
     capture_via_accessibility,
+    extract_lint_screen_rects,
     get_foreground_window_state,
     replace_active_text,
 };

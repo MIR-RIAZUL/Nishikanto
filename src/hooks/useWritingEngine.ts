@@ -1,6 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
+export interface ScreenRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface LocalLintResult {
   id: string;
   start: number;
@@ -10,6 +17,7 @@ export interface LocalLintResult {
   subcategory: string;
   message: string;
   suggestions: string[];
+  screen_bounds?: ScreenRect;
 }
 
 export interface GeminiAnalysisResult {
