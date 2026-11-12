@@ -486,6 +486,63 @@ fn calculate_smart_pill_position(
     (target_x.clamp(min_x, max_x), target_y.clamp(min_y, max_y))
 }
 
+fn calculate_micro_popover_position(
+    sb: &os_bridge::ScreenRect,
+    widget_win: &tauri::WebviewWindow,
+) -> (i32, i32, f64, f64, f64, f64) {
+    let (mon_x, mon_y, mon_w, mon_h, sf) = if let Ok(Some(mon)) = widget_win.current_monitor() {
+        let p = mon.position();
+        let s = mon.size();
+        let scale = mon.scale_factor();
+        (
+            p.x as f64,
+            p.y as f64,
+            s.width as f64,
+            s.height as f64,
+            if scale > 0.0 { scale } else { 1.0 },
+        )
+    } else {
+        (0.0, 0.0, 1920.0, 1080.0, 1.0)
+    };
+
+    // The micro-popover card is styled as 264x145 CSS/logical pixels in React.
+    // In physical pixels on this monitor:
+    let card_w_phys = 264.0 * sf;
+    let card_h_phys = 145.0 * sf;
+    let gap = 6.0 * sf;
+    let margin = 8.0 * sf;
+
+    // Default placement: directly below the word, top-left aligned with start of word
+    let target_x = sb.x;
+    let mut target_y = sb.y + sb.height + gap;
+
+    // If the word is near the bottom of the screen and the card would clip off-screen,
+    // flip it cleanly above the word:
+    if target_y + card_h_phys > mon_y + mon_h - margin {
+        target_y = sb.y - card_h_phys - gap;
+    }
+
+    // Clamp X so the card never overflows the right or left edge of the monitor:
+    let clamped_x = target_x.clamp(
+        mon_x + margin,
+        (mon_x + mon_w - card_w_phys - margin).max(mon_x + margin),
+    );
+    // Clamp Y to monitor bounds:
+    let clamped_y = target_y.clamp(
+        mon_y + margin,
+        (mon_y + mon_h - card_h_phys - margin).max(mon_y + margin),
+    );
+
+    (
+        clamped_x.round() as i32,
+        clamped_y.round() as i32,
+        clamped_x,
+        clamped_y,
+        card_w_phys,
+        card_h_phys,
+    )
+}
+
 fn update_underlines_window(app: &tauri::AppHandle, lints: &[LocalLintResult]) {
     let has_bounds = lints.iter().any(|l| l.screen_bounds.is_some());
     if let Some(underlines_win) = app.get_webview_window("underlines") {
@@ -675,23 +732,17 @@ fn show_micro_popover(
 ) {
     state.widget_expanded.store(false, Ordering::SeqCst);
     if let Some(widget_win) = app.get_webview_window("widget") {
-        let (mon_x, mon_y, mon_w, mon_h) = if let Ok(Some(mon)) = widget_win.current_monitor() {
-            let p = mon.position();
-            let s = mon.size();
-            let scale = mon.scale_factor();
-            (p.x as f64 / scale, p.y as f64 / scale, s.width as f64 / scale, s.height as f64 / scale)
-        } else {
-            (0.0, 0.0, 1920.0, 1080.0)
-        };
+        let sb = lint.screen_bounds.clone().unwrap_or(os_bridge::ScreenRect {
+            x,
+            y,
+            width: 40.0,
+            height: 20.0,
+        });
 
-        let pop_w = 264.0;
-        let pop_h = 145.0;
+        let (pos_x, pos_y, _, _, _, _) = calculate_micro_popover_position(&sb, &widget_win);
 
-        let clamped_x = x.clamp(mon_x + 8.0, (mon_x + mon_w - pop_w - 8.0).max(mon_x + 8.0));
-        let clamped_y = y.clamp(mon_y + 8.0, (mon_y + mon_h - pop_h - 8.0).max(mon_y + 8.0));
-
-        let _ = widget_win.set_position(tauri::Position::Logical(LogicalPosition::new(clamped_x, clamped_y)));
-        let _ = widget_win.set_size(LogicalSize::new(pop_w, pop_h));
+        let _ = widget_win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(pos_x, pos_y)));
+        let _ = widget_win.set_size(LogicalSize::new(264.0, 145.0));
         let _ = widget_win.show();
         let _ = app.emit("os-lint-hovered", lint);
     }
@@ -1186,14 +1237,10 @@ pub fn run() {
                     if !watcher_state.widget_expanded.load(Ordering::SeqCst) {
                         if let Some((raw_cur_x, raw_cur_y)) = os_bridge::get_cursor_position() {
                             if let Some(widget_win) = watcher_app.get_webview_window("widget") {
-                                let sf = widget_win
-                                    .current_monitor()
-                                    .ok()
-                                    .flatten()
-                                    .map(|m| m.scale_factor())
-                                    .unwrap_or(1.0);
-                                let cur_x = raw_cur_x / sf;
-                                let cur_y = raw_cur_y / sf;
+                                // raw_cur_x/y are physical screen pixels.
+                                // screen_bounds are also in physical pixels now.
+                                let cur_x = raw_cur_x;
+                                let cur_y = raw_cur_y;
 
                                 let mut found_hovered: Option<&LocalLintResult> = None;
                                 for lint in &cached_lints {
@@ -1215,35 +1262,34 @@ pub fn run() {
                                         current_hovered_lint_id = Some(hovered.id.clone());
 
                                         let sb = hovered.screen_bounds.as_ref().unwrap();
-                                        let target_x = sb.x;
-                                        let target_y = sb.y + sb.height + 6.0;
+                                        let (pos_x, pos_y, c_x, c_y, c_w, c_h) =
+                                            calculate_micro_popover_position(sb, &widget_win);
 
-                                        let pop_w = 264.0;
-                                        let pop_h = 145.0;
+                                        // Store exact physical bounding box of popover card for hit-testing
+                                        popover_rect = Some((c_x, c_y, c_w, c_h));
 
-                                        let (mon_x, mon_y, mon_w, mon_h) = if let Ok(Some(mon)) = widget_win.current_monitor() {
-                                            let p = mon.position();
-                                            let s = mon.size();
-                                            let scale = mon.scale_factor();
-                                            (p.x as f64 / scale, p.y as f64 / scale, s.width as f64 / scale, s.height as f64 / scale)
-                                        } else {
-                                            (0.0, 0.0, 1920.0, 1080.0)
-                                        };
-
-                                        let clamped_x = target_x.clamp(mon_x + 8.0, (mon_x + mon_w - pop_w - 8.0).max(mon_x + 8.0));
-                                        let clamped_y = target_y.clamp(mon_y + 8.0, (mon_y + mon_h - pop_h - 8.0).max(mon_y + 8.0));
-
-                                        popover_rect = Some((clamped_x, clamped_y, pop_w, pop_h));
-
-                                        let _ = widget_win.set_position(tauri::Position::Logical(LogicalPosition::new(clamped_x, clamped_y)));
-                                        let _ = widget_win.set_size(LogicalSize::new(pop_w, pop_h));
+                                        // Set position using exact physical coordinates
+                                        let _ = widget_win.set_position(tauri::Position::Physical(
+                                            tauri::PhysicalPosition::new(pos_x, pos_y),
+                                        ));
+                                        let _ = widget_win.set_size(LogicalSize::new(264.0, 145.0));
                                         let _ = widget_win.show();
                                         let _ = watcher_app.emit("os-lint-hovered", hovered);
                                     }
                                 } else {
                                     // Not over a word. Check if cursor is inside the micro-popover card itself
+                                    let sf = widget_win
+                                        .current_monitor()
+                                        .ok()
+                                        .flatten()
+                                        .map(|m| m.scale_factor())
+                                        .unwrap_or(1.0);
+                                    let pad = 8.0 * sf;
                                     let is_inside_popover = if let Some((px, py, pw, ph)) = popover_rect {
-                                        cur_x >= px - 6.0 && cur_x <= px + pw + 6.0 && cur_y >= py - 6.0 && cur_y <= py + ph + 6.0
+                                        cur_x >= px - pad
+                                            && cur_x <= px + pw + pad
+                                            && cur_y >= py - pad
+                                            && cur_y <= py + ph + pad
                                     } else {
                                         false
                                     };

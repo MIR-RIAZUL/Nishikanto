@@ -37,6 +37,7 @@ mod platform {
     use windows_sys::Win32::System::Threading::*;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
+    use windows_sys::Win32::Graphics::Gdi::ClientToScreen;
 
     static LAST_FOREGROUND_HWND: AtomicIsize = AtomicIsize::new(0);
 
@@ -279,72 +280,146 @@ mod platform {
             return;
         }
 
+        let sf = if scale_factor > 0.0 { scale_factor } else { 1.0 };
+
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-            let automation: IUIAutomation = match CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) {
-                Ok(a) => a,
-                Err(_) => return,
-            };
-            let focused = match automation.GetFocusedElement() {
-                Ok(f) => f,
-                Err(_) => return,
-            };
+            if let Ok(automation) = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) {
+                if let Ok(focused) = automation.GetFocusedElement() {
+                    if let Ok(text_pattern) = focused.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) {
+                        // 1. Primary path: per-word exact bounding rectangles via DocumentRange
+                        if let Ok(doc_range) = text_pattern.DocumentRange() {
+                            for lint in lints.iter_mut() {
+                                let len = lint.end.saturating_sub(lint.start);
+                                if len == 0 {
+                                    continue;
+                                }
 
-            if let Ok(text_pattern) = focused.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) {
-                if let Ok(doc_range) = text_pattern.DocumentRange() {
-                    let sf = if scale_factor > 0.0 { scale_factor } else { 1.0 };
+                                if let Ok(word_range) = doc_range.Clone() {
+                                    let _ = word_range.Move(TextUnit_Character, lint.start as i32);
+                                    let _ = word_range.MoveEndpointByUnit(
+                                        TextPatternRangeEndpoint_End,
+                                        TextUnit_Character,
+                                        len as i32,
+                                    );
 
-                    for lint in lints.iter_mut() {
-                        let len = lint.end.saturating_sub(lint.start);
-                        if len == 0 {
-                            continue;
+                                    if let Ok(sa) = word_range.GetBoundingRectangles() {
+                                        let lbound = SafeArrayGetLBound(sa, 1).unwrap_or(0);
+                                        let ubound = SafeArrayGetUBound(sa, 1).unwrap_or(-1);
+                                        let count = if ubound >= lbound {
+                                            (ubound - lbound + 1) as usize
+                                        } else {
+                                            0
+                                        };
+
+                                        if count >= 4 {
+                                            let mut data_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+                                            if SafeArrayAccessData(sa, &mut data_ptr).is_ok() {
+                                                let slice = std::slice::from_raw_parts(data_ptr as *const f64, count);
+                                                let phys_x = slice[0];
+                                                let phys_y = slice[1];
+                                                let phys_w = slice[2];
+                                                let phys_h = slice[3];
+                                                let _ = SafeArrayUnaccessData(sa);
+
+                                                // Ensure word is vertically inside input area (not scrolled out)
+                                                let visible = phys_y + phys_h >= box_bounds.y - 12.0
+                                                    && phys_y <= box_bounds.y + box_bounds.height + 12.0;
+
+                                                if phys_w > 0.0 && phys_h > 0.0 && visible {
+                                                    // Store raw physical screen pixels —
+                                                    // Tauri PhysicalPosition handles DPI;
+                                                    // React divides by devicePixelRatio.
+                                                    lint.screen_bounds = Some(ScreenRect {
+                                                        x: phys_x,
+                                                        y: phys_y,
+                                                        width: phys_w,
+                                                        height: phys_h,
+                                                    });
+                                                }
+                                            }
+                                        }
+                                        let _ = SafeArrayDestroy(sa);
+                                    }
+                                }
+                            }
                         }
 
-                        if let Ok(word_range) = doc_range.Clone() {
-                            let _ = word_range.Move(TextUnit_Character, lint.start as i32);
-                            let _ = word_range.MoveEndpointByUnit(
-                                TextPatternRangeEndpoint_End,
-                                TextUnit_Character,
-                                len as i32,
-                            );
+                        // 2. Fallback Chain Step 1: If per-word bounding rects failed, query UIA selection (caret)
+                        if lints.iter().all(|l| l.screen_bounds.is_none()) {
+                            if let Ok(selections) = text_pattern.GetSelection() {
+                                if let Ok(count) = selections.Length() {
+                                    if count > 0 {
+                                        if let Ok(sel_range) = selections.GetElement(0) {
+                                            if let Ok(sa) = sel_range.GetBoundingRectangles() {
+                                                let lbound = SafeArrayGetLBound(sa, 1).unwrap_or(0);
+                                                let ubound = SafeArrayGetUBound(sa, 1).unwrap_or(-1);
+                                                let cnt = if ubound >= lbound {
+                                                    (ubound - lbound + 1) as usize
+                                                } else {
+                                                    0
+                                                };
+                                                if cnt >= 4 {
+                                                    let mut data_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+                                                    if SafeArrayAccessData(sa, &mut data_ptr).is_ok() {
+                                                        let slice = std::slice::from_raw_parts(data_ptr as *const f64, cnt);
+                                                        let cx = slice[0];
+                                                        let cy = slice[1];
+                                                        let cw = slice[2].max(30.0 * sf);
+                                                        let ch = if slice[3] > 0.0 { slice[3] } else { 20.0 * sf };
+                                                        let _ = SafeArrayUnaccessData(sa);
 
-                            if let Ok(sa) = word_range.GetBoundingRectangles() {
-                                let lbound = SafeArrayGetLBound(sa, 1).unwrap_or(0);
-                                let ubound = SafeArrayGetUBound(sa, 1).unwrap_or(-1);
-                                let count = if ubound >= lbound {
-                                    (ubound - lbound + 1) as usize
-                                } else {
-                                    0
-                                };
-
-                                if count >= 4 {
-                                    let mut data_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
-                                    if SafeArrayAccessData(sa, &mut data_ptr).is_ok() {
-                                        let slice = std::slice::from_raw_parts(data_ptr as *const f64, count);
-                                        let phys_x = slice[0];
-                                        let phys_y = slice[1];
-                                        let phys_w = slice[2];
-                                        let phys_h = slice[3];
-                                        let _ = SafeArrayUnaccessData(sa);
-
-                                        // Ensure word is vertically inside input area (not scrolled out)
-                                        let visible = phys_y + phys_h >= box_bounds.y - 12.0
-                                            && phys_y <= box_bounds.y + box_bounds.height + 12.0;
-
-                                        if phys_w > 0.0 && phys_h > 0.0 && visible {
-                                            lint.screen_bounds = Some(ScreenRect {
-                                                x: phys_x / sf,
-                                                y: phys_y / sf,
-                                                width: phys_w / sf,
-                                                height: phys_h / sf,
-                                            });
+                                                        if cx > 0.0 && cy > 0.0 {
+                                                            for lint in lints.iter_mut() {
+                                                                lint.screen_bounds = Some(ScreenRect {
+                                                                    x: cx,
+                                                                    y: cy,
+                                                                    width: cw,
+                                                                    height: ch,
+                                                                });
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                let _ = SafeArrayDestroy(sa);
+                                            }
                                         }
                                     }
                                 }
-                                let _ = SafeArrayDestroy(sa);
                             }
                         }
                     }
+                }
+            }
+
+            // 3. Fallback Chain Step 2: Win32 GetGUIThreadInfo caret position if UIA per-word rects failed
+            if lints.iter().all(|l| l.screen_bounds.is_none()) {
+                if let Some((caret_x, caret_y)) = get_caret_position_physical() {
+                    if caret_x > 0.0 && caret_y > 0.0 {
+                        let line_h = 20.0 * sf;
+                        for lint in lints.iter_mut() {
+                            lint.screen_bounds = Some(ScreenRect {
+                                x: caret_x,
+                                y: caret_y,
+                                width: 40.0 * sf,
+                                height: line_h,
+                            });
+                        }
+                    }
+                }
+            }
+
+            // 4. Fallback Chain Step 3: Anchor near bottom-left of active text box bounds
+            if lints.iter().all(|l| l.screen_bounds.is_none()) && box_bounds.width > 20.0 {
+                let default_x = box_bounds.x + 16.0;
+                let default_y = (box_bounds.y + box_bounds.height - 28.0 * sf).max(box_bounds.y + 8.0);
+                for lint in lints.iter_mut() {
+                    lint.screen_bounds = Some(ScreenRect {
+                        x: default_x,
+                        y: default_y,
+                        width: 40.0 * sf,
+                        height: 20.0 * sf,
+                    });
                 }
             }
         }
@@ -442,6 +517,36 @@ mod platform {
             } else {
                 None
             }
+        }
+    }
+
+    /// Returns the text caret (blinking cursor) position in physical screen
+    /// pixels via `GetGUIThreadInfo` + `ClientToScreen`. Used as a fallback
+    /// when `GetBoundingRectangles` returns no data.
+    pub fn get_caret_position_physical() -> Option<(f64, f64)> {
+        unsafe {
+            let hwnd = GetForegroundWindow();
+            if hwnd.is_null() {
+                return None;
+            }
+            let tid = GetWindowThreadProcessId(hwnd, std::ptr::null_mut());
+            if tid == 0 {
+                return None;
+            }
+
+            let mut gui: GUITHREADINFO = std::mem::zeroed();
+            gui.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+            if GetGUIThreadInfo(tid, &mut gui) == 0 {
+                return None;
+            }
+            // rcCaret is in client coordinates of gui.hwndCaret
+            let target = if gui.hwndCaret.is_null() { hwnd } else { gui.hwndCaret };
+            let mut pt = POINT {
+                x: gui.rcCaret.left,
+                y: gui.rcCaret.top,
+            };
+            ClientToScreen(target, &mut pt);
+            Some((pt.x as f64, pt.y as f64))
         }
     }
 
@@ -597,6 +702,10 @@ mod platform {
         None
     }
 
+    pub fn get_caret_position_physical() -> Option<(f64, f64)> {
+        None
+    }
+
     pub fn replace_single_word(
         _start: usize,
         _end: usize,
@@ -611,6 +720,7 @@ pub use platform::{
     capture_active_context,
     capture_via_accessibility,
     extract_lint_screen_rects,
+    get_caret_position_physical,
     get_cursor_position,
     get_foreground_window_state,
     replace_active_text,

@@ -48,6 +48,9 @@ export function UnderlinesWindow() {
     return null;
   }
 
+  // Convert OS physical screen coordinates to Webview CSS logical pixels
+  const dpr = typeof window !== "undefined" && window.devicePixelRatio ? window.devicePixelRatio : 1;
+
   return (
     <div className="fixed inset-0 w-screen h-screen pointer-events-none overflow-hidden select-none z-[999999]">
       {lints.map((lint) => {
@@ -55,15 +58,20 @@ export function UnderlinesWindow() {
         const { x, y, width, height } = lint.screen_bounds;
         const isCorrectness = lint.category === "Correctness";
 
+        const left = x / dpr;
+        const top = y / dpr;
+        const w = width / dpr;
+        const h = height / dpr;
+
         return (
           <div
             key={lint.id}
             className="absolute pointer-events-none transition-all duration-150 ease-out"
             style={{
-              left: `${x}px`,
-              top: `${y}px`,
-              width: `${width}px`,
-              height: `${height}px`,
+              left: `${left}px`,
+              top: `${top}px`,
+              width: `${w}px`,
+              height: `${h}px`,
             }}
           >
             {/* Subtle highlight tint over the flagged word */}
