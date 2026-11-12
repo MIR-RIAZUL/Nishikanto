@@ -60,7 +60,7 @@ Configured natively in `src-tauri/tauri.conf.json`:
 ### Installation
 ```bash
 # Clone the repository
-git clone <repo-url>
+git clone https://github.com/MIR-RIAZUL/Nishikanto.git
 cd Nishikanto
 
 # Install npm dependencies
