@@ -1,9 +1,18 @@
+import { useEffect } from "react";
 import { useTauriState } from "./hooks/useTauriState";
 import { MainWindow } from "./components/MainWindow";
 import { WidgetWindow } from "./components/WidgetWindow";
+import { getDb } from "./services/db";
 
 export default function App() {
   const { windowLabel, isTauri } = useTauriState();
+
+  // Initialize SQLite database and sync with Rust engine on startup
+  useEffect(() => {
+    getDb().catch((e) => {
+      console.warn("Database initialization:", e);
+    });
+  }, []);
 
   // Route based on Tauri window label or query param
   const isWidget = windowLabel === "widget";

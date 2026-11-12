@@ -13,6 +13,7 @@ pub struct CapturedContext {
     pub text: String,
     pub bounds: ScreenRect,
     pub source_app: String,
+    pub process_name: String,
     pub method: String,
 }
 
@@ -25,10 +26,39 @@ mod platform {
     use windows::Win32::System::Com::*;
     use windows::Win32::UI::Accessibility::*;
     use windows_sys::Win32::Foundation::*;
+    use windows_sys::Win32::System::Threading::*;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
     static LAST_FOREGROUND_HWND: AtomicIsize = AtomicIsize::new(0);
+
+    pub fn get_process_name_for_hwnd(hwnd: HWND) -> String {
+        unsafe {
+            let mut pid: u32 = 0;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            if pid == 0 {
+                return String::new();
+            }
+
+            let process_handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if process_handle.is_null() {
+                return String::new();
+            }
+
+            let mut path_buf = [0u16; 1024];
+            let mut size = 1024u32;
+            let success = QueryFullProcessImageNameW(process_handle, 0, path_buf.as_mut_ptr(), &mut size);
+            CloseHandle(process_handle);
+
+            if success != 0 && size > 0 {
+                let full_path = String::from_utf16_lossy(&path_buf[..size as usize]);
+                if let Some(exe_name) = std::path::Path::new(&full_path).file_name() {
+                    return exe_name.to_string_lossy().to_string();
+                }
+            }
+            String::new()
+        }
+    }
 
     pub fn simulate_key_combination(ctrl_or_cmd: u16, key: u16) {
         unsafe {
@@ -52,12 +82,13 @@ mod platform {
         }
     }
 
-    pub fn get_foreground_app_info() -> (String, ScreenRect) {
+    pub fn get_foreground_app_info() -> (String, String, ScreenRect) {
         unsafe {
             let hwnd = GetForegroundWindow();
             if hwnd.is_null() {
                 return (
                     "Unknown Application".to_string(),
+                    String::new(),
                     ScreenRect {
                         x: 100.0,
                         y: 100.0,
@@ -68,11 +99,14 @@ mod platform {
             }
 
             LAST_FOREGROUND_HWND.store(hwnd as isize, Ordering::SeqCst);
+            let process_name = get_process_name_for_hwnd(hwnd);
 
             let mut title_buf = [0u16; 512];
             let len = GetWindowTextW(hwnd, title_buf.as_mut_ptr(), 512);
             let title = if len > 0 {
                 String::from_utf16_lossy(&title_buf[..len as usize])
+            } else if !process_name.is_empty() {
+                process_name.clone()
             } else {
                 "Active Window".to_string()
             };
@@ -87,7 +121,7 @@ mod platform {
                 height: (rect.bottom - rect.top).max(50) as f64,
             };
 
-            (title, screen_rect)
+            (title, process_name, screen_rect)
         }
     }
 
@@ -97,6 +131,12 @@ mod platform {
             if !hwnd.is_null() {
                 LAST_FOREGROUND_HWND.store(hwnd as isize, Ordering::SeqCst);
             }
+            let process_name = if !hwnd.is_null() {
+                get_process_name_for_hwnd(hwnd)
+            } else {
+                String::new()
+            };
+
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
             let automation: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
             let focused = automation.GetFocusedElement().ok()?;
@@ -109,7 +149,13 @@ mod platform {
                 height: (rect.bottom - rect.top).max(20) as f64,
             };
 
-            let app_name = focused.CurrentName().map(|b| b.to_string()).unwrap_or_else(|_| "Focused Application".to_string());
+            let app_name = focused.CurrentName().map(|b| b.to_string()).unwrap_or_else(|_| {
+                if !process_name.is_empty() {
+                    process_name.clone()
+                } else {
+                    "Focused Application".to_string()
+                }
+            });
 
             // 1. Try TextPattern for selected text or full text
             if let Ok(text_pattern) = focused.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) {
@@ -124,6 +170,7 @@ mod platform {
                                             text: s,
                                             bounds,
                                             source_app: app_name,
+                                            process_name: process_name.clone(),
                                             method: "accessibility_text_pattern".to_string(),
                                         });
                                     }
@@ -142,6 +189,7 @@ mod platform {
                                 text: s,
                                 bounds,
                                 source_app: app_name,
+                                process_name: process_name.clone(),
                                 method: "accessibility_doc_pattern".to_string(),
                             });
                         }
@@ -158,6 +206,7 @@ mod platform {
                             text: s,
                             bounds,
                             source_app: app_name,
+                            process_name: process_name.clone(),
                             method: "accessibility_value_pattern".to_string(),
                         });
                     }
@@ -175,7 +224,7 @@ mod platform {
             return ctx;
         }
 
-        let (source_app, window_bounds) = get_foreground_app_info();
+        let (source_app, process_name, window_bounds) = get_foreground_app_info();
 
         // Safe clipboard backup & restore fallback
         let mut clipboard = arboard::Clipboard::new().ok();
@@ -203,6 +252,7 @@ mod platform {
             text: copied_text,
             bounds: window_bounds,
             source_app,
+            process_name,
             method: "clipboard_fallback".to_string(),
         }
     }
@@ -290,6 +340,7 @@ mod platform {
                 height: 120.0,
             },
             source_app: "Active Application".to_string(),
+            process_name: "App".to_string(),
             method: "clipboard_fallback".to_string(),
         }
     }
@@ -318,3 +369,21 @@ mod platform {
 }
 
 pub use platform::{capture_active_context, replace_active_text};
+
+pub fn get_active_process_name() -> String {
+    #[cfg(windows)]
+    {
+        unsafe {
+            let hwnd = windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow();
+            if !hwnd.is_null() {
+                platform::get_process_name_for_hwnd(hwnd)
+            } else {
+                String::new()
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        String::new()
+    }
+}

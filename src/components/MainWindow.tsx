@@ -13,12 +13,14 @@ import {
   CheckCircle2,
   AlertCircle,
   HelpCircle,
-  ShieldCheck,
   Loader2,
   BookOpen,
+  BookMarked,
 } from "lucide-react";
 import { useTauriState } from "../hooks/useTauriState";
 import { useWritingEngine } from "../hooks/useWritingEngine";
+import { SettingsView } from "./SettingsView";
+import { addWordToDictionary } from "../services/db";
 
 export function MainWindow() {
   const { isPaused, togglePause, hideMainEditor } = useTauriState();
@@ -563,11 +565,11 @@ export function MainWindow() {
                         {/* Explanation Message */}
                         <p className="text-xs text-slate-300 leading-relaxed">{lint.message}</p>
 
-                        {/* Card Actions: Accept & Ignore */}
-                        <div className="flex items-center gap-2 pt-1 border-t border-white/5">
+                        {/* Card Actions: Accept, Ignore & Add to Dictionary */}
+                        <div className="flex items-center gap-1.5 pt-1 border-t border-white/5">
                           <button
                             onClick={() => acceptSuggestion(lint, primarySuggestion)}
-                            className="flex-1 py-1.5 px-3 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-sm shadow-indigo-600/30 transition-all cursor-pointer flex items-center justify-center gap-1.5"
+                            className="flex-1 py-1.5 px-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-sm shadow-indigo-600/30 transition-all cursor-pointer flex items-center justify-center gap-1.5"
                           >
                             <Check className="w-3.5 h-3.5" />
                             <span>Accept</span>
@@ -575,9 +577,21 @@ export function MainWindow() {
 
                           <button
                             onClick={() => ignoreSuggestion(lint.id)}
-                            className="py-1.5 px-3 rounded-lg bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white text-xs font-medium transition-all cursor-pointer"
+                            className="py-1.5 px-2 rounded-lg bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white text-xs font-medium transition-all cursor-pointer"
                           >
                             Ignore
+                          </button>
+
+                          <button
+                            onClick={async () => {
+                              await addWordToDictionary(lint.flagged_text);
+                              ignoreSuggestion(lint.id);
+                            }}
+                            title="Add to personal dictionary so it is never flagged again"
+                            className="py-1.5 px-2 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 text-xs font-medium transition-all cursor-pointer flex items-center gap-1"
+                          >
+                            <BookMarked className="w-3 h-3" />
+                            <span>+ Dict</span>
                           </button>
                         </div>
                       </div>
@@ -588,61 +602,7 @@ export function MainWindow() {
             </aside>
           </div>
         ) : (
-          /* Architecture Settings Tab */
-          <main className="flex-1 p-8 overflow-y-auto bg-slate-950">
-            <div className="max-w-2xl mx-auto flex flex-col gap-6">
-              <div>
-                <h2 className="text-xl font-bold text-white tracking-tight">
-                  Two-Tier Engine Architecture
-                </h2>
-                <p className="text-xs text-slate-400 mt-1">
-                  Harper Core local-first engine and Google Gemini cloud AI layer.
-                </p>
-              </div>
-
-              {/* Tier 1 Info Card */}
-              <div className="bg-slate-900/60 border border-white/10 rounded-2xl p-5 flex flex-col gap-3">
-                <div className="flex items-center gap-2 text-sm font-semibold text-white">
-                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-400" />
-                  <span>Tier 1: Instant Offline Engine (Harper Core)</span>
-                </div>
-                <p className="text-xs text-slate-400 leading-relaxed">
-                  Embedded Rust language checker compiled natively into the binary. Analyzes text in under 5ms without network calls. Provides exact character start/end offsets, flagged substrings, grammar/spelling classifications, and replacement suggestions.
-                </p>
-                <div className="flex items-center gap-2 text-xs font-mono text-emerald-400 bg-emerald-500/10 p-2.5 rounded-xl border border-emerald-500/20">
-                  <span>Latency: ~2-5ms • Memory: &lt;10MB • Offline Privacy: 100%</span>
-                </div>
-              </div>
-
-              {/* Tier 2 Info Card */}
-              <div className="bg-slate-900/60 border border-white/10 rounded-2xl p-5 flex flex-col gap-3">
-                <div className="flex items-center gap-2 text-sm font-semibold text-white">
-                  <span className="w-2.5 h-2.5 rounded-full bg-indigo-400" />
-                  <span>Tier 2: Free-Tier Gemini AI Layer</span>
-                </div>
-                <p className="text-xs text-slate-400 leading-relaxed">
-                  Calls the Gemini REST API using model <code className="text-indigo-300">gemini-3.5-flash-lite</code> (configured in <code className="text-indigo-300">.env</code>). Computes semantic writing scores (0-100), detects nuanced tone with emojis, and provides 1-click full document rewrites (Formal, Casual, Concise, Fix All).
-                </p>
-                <div className="p-3 bg-white/5 rounded-xl border border-white/10 text-xs flex flex-col gap-1.5">
-                  <span className="text-slate-300 font-medium">Environment Setup:</span>
-                  <code className="text-indigo-300 font-mono text-[11px]">
-                    GEMINI_API_KEY="your-gemini-api-key" in .env
-                  </code>
-                </div>
-              </div>
-
-              {/* Floating Non-Focusable Widget Info */}
-              <div className="bg-slate-900/60 border border-white/10 rounded-2xl p-5 flex flex-col gap-3">
-                <div className="flex items-center gap-2 text-sm font-semibold text-white">
-                  <ShieldCheck className="w-4 h-4 text-purple-400" />
-                  <span>Floating Overlay Widget (340x440)</span>
-                </div>
-                <p className="text-xs text-slate-400 leading-relaxed">
-                  The companion widget is configured with <code className="text-purple-300">focusable: false</code>, <code className="text-purple-300">transparent: true</code>, and <code className="text-purple-300">alwaysOnTop: true</code>. It never steals keyboard focus from Microsoft Word, VS Code, Google Docs, or Slack.
-                </p>
-              </div>
-            </div>
-          </main>
+          <SettingsView />
         )}
       </div>
     </div>

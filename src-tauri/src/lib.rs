@@ -39,6 +39,7 @@ pub struct GeminiAnalysisResult {
 pub struct OsCapturePayload {
     pub text: String,
     pub source_app: String,
+    pub process_name: String,
     pub method: String,
     pub bounds: os_bridge::ScreenRect,
     pub lints: Vec<LocalLintResult>,
@@ -48,6 +49,9 @@ pub struct AppState {
     pub paused: AtomicBool,
     pub lint_group: Mutex<LintGroup>,
     pub http_client: reqwest::Client,
+    pub custom_dictionary: Mutex<std::collections::HashSet<String>>,
+    pub app_exclusions: Mutex<std::collections::HashSet<String>>,
+    pub custom_api_key: Mutex<Option<String>>,
 }
 
 fn categorize_lint(kind: LintKind, message: &str) -> (&'static str, String) {
@@ -222,6 +226,14 @@ fn check_text_local(
         }
     }
 
+    // Filter out words in the user's personal dictionary
+    let custom_dict = state.custom_dictionary.lock().unwrap();
+    results.retain(|r| {
+        let text_lower = r.flagged_text.to_lowercase();
+        let text_trim = r.flagged_text.trim().to_lowercase();
+        !custom_dict.contains(&text_lower) && !custom_dict.contains(&text_trim)
+    });
+
     results.sort_by_key(|r| r.start);
 
     Ok(results)
@@ -248,9 +260,16 @@ async fn analyze_with_gemini(
     let _ = dotenvy::from_filename(".env");
     let _ = dotenvy::from_filename("../.env");
 
-    let api_key = std::env::var("GEMINI_API_KEY")
-        .or_else(|_| dotenvy::var("GEMINI_API_KEY"))
-        .unwrap_or_default();
+    let api_key = {
+        let custom = state.custom_api_key.lock().unwrap();
+        if let Some(ref k) = *custom {
+            k.clone()
+        } else {
+            std::env::var("GEMINI_API_KEY")
+                .or_else(|_| dotenvy::var("GEMINI_API_KEY"))
+                .unwrap_or_default()
+        }
+    };
 
     if api_key.trim().is_empty() {
         return Ok(GeminiAnalysisResult {
@@ -439,6 +458,14 @@ pub fn trigger_os_capture_and_show(app: &tauri::AppHandle) -> Result<os_bridge::
                         });
                     }
                 }
+                if let Some(state) = app.try_state::<Arc<AppState>>() {
+                    let custom_dict = state.custom_dictionary.lock().unwrap();
+                    res.retain(|r| {
+                        let text_lower = r.flagged_text.to_lowercase();
+                        let text_trim = r.flagged_text.trim().to_lowercase();
+                        !custom_dict.contains(&text_lower) && !custom_dict.contains(&text_trim)
+                    });
+                }
                 res
             } else {
                 Vec::new()
@@ -449,6 +476,25 @@ pub fn trigger_os_capture_and_show(app: &tauri::AppHandle) -> Result<os_bridge::
     } else {
         Vec::new()
     };
+
+    // Check if the foreground application is blacklisted/excluded
+    let is_excluded = if let Some(state) = app.try_state::<Arc<AppState>>() {
+        let exclusions = state.app_exclusions.lock().unwrap();
+        let proc = context.process_name.to_lowercase();
+        let app_title = context.source_app.to_lowercase();
+        (!proc.is_empty() && (exclusions.contains(&proc) || exclusions.iter().any(|ex| proc.contains(ex))))
+            || (!app_title.is_empty() && (exclusions.contains(&app_title) || exclusions.iter().any(|ex| app_title.contains(ex))))
+    } else {
+        false
+    };
+
+    if is_excluded {
+        println!("Application '{}' ({}) is excluded. Hiding widget.", context.source_app, context.process_name);
+        if let Some(widget_win) = app.get_webview_window("widget") {
+            let _ = widget_win.hide();
+        }
+        return Ok(context);
+    }
 
     // Calculate smart positioning (beside or just below the active text box)
     if let Some(widget_win) = app.get_webview_window("widget") {
@@ -478,6 +524,7 @@ pub fn trigger_os_capture_and_show(app: &tauri::AppHandle) -> Result<os_bridge::
     let payload = OsCapturePayload {
         text: context.text.clone(),
         source_app: context.source_app.clone(),
+        process_name: context.process_name.clone(),
         method: context.method.clone(),
         bounds: context.bounds.clone(),
         lints,
@@ -594,6 +641,175 @@ fn set_widget_height(app: tauri::AppHandle, height: f64) {
     }
 }
 
+#[tauri::command]
+fn add_to_dictionary(state: State<Arc<AppState>>, word: String) -> Vec<String> {
+    let mut dict = state.custom_dictionary.lock().unwrap();
+    let clean = word.trim().to_lowercase();
+    if !clean.is_empty() {
+        dict.insert(clean);
+    }
+    let mut list: Vec<String> = dict.iter().cloned().collect();
+    list.sort();
+    list
+}
+
+#[tauri::command]
+fn remove_from_dictionary(state: State<Arc<AppState>>, word: String) -> Vec<String> {
+    let mut dict = state.custom_dictionary.lock().unwrap();
+    dict.remove(&word.trim().to_lowercase());
+    let mut list: Vec<String> = dict.iter().cloned().collect();
+    list.sort();
+    list
+}
+
+#[tauri::command]
+fn sync_dictionary(state: State<Arc<AppState>>, words: Vec<String>) -> Vec<String> {
+    let mut dict = state.custom_dictionary.lock().unwrap();
+    dict.clear();
+    for w in words {
+        let clean = w.trim().to_lowercase();
+        if !clean.is_empty() {
+            dict.insert(clean);
+        }
+    }
+    let mut list: Vec<String> = dict.iter().cloned().collect();
+    list.sort();
+    list
+}
+
+#[tauri::command]
+fn get_dictionary_words(state: State<Arc<AppState>>) -> Vec<String> {
+    let dict = state.custom_dictionary.lock().unwrap();
+    let mut list: Vec<String> = dict.iter().cloned().collect();
+    list.sort();
+    list
+}
+
+#[tauri::command]
+fn add_app_exclusion(app: tauri::AppHandle, state: State<Arc<AppState>>, app_name: String) -> Vec<String> {
+    let mut exclusions = state.app_exclusions.lock().unwrap();
+    let clean = app_name.trim().to_lowercase();
+    if !clean.is_empty() {
+        exclusions.insert(clean);
+    }
+    if let Some(widget_win) = app.get_webview_window("widget") {
+        let _ = widget_win.hide();
+    }
+    let mut list: Vec<String> = exclusions.iter().cloned().collect();
+    list.sort();
+    list
+}
+
+#[tauri::command]
+fn remove_app_exclusion(state: State<Arc<AppState>>, app_name: String) -> Vec<String> {
+    let mut exclusions = state.app_exclusions.lock().unwrap();
+    exclusions.remove(&app_name.trim().to_lowercase());
+    let mut list: Vec<String> = exclusions.iter().cloned().collect();
+    list.sort();
+    list
+}
+
+#[tauri::command]
+fn sync_app_exclusions(state: State<Arc<AppState>>, apps: Vec<String>) -> Vec<String> {
+    let mut exclusions = state.app_exclusions.lock().unwrap();
+    exclusions.clear();
+    for a in apps {
+        let clean = a.trim().to_lowercase();
+        if !clean.is_empty() {
+            exclusions.insert(clean);
+        }
+    }
+    let mut list: Vec<String> = exclusions.iter().cloned().collect();
+    list.sort();
+    list
+}
+
+#[tauri::command]
+fn get_app_exclusions(state: State<Arc<AppState>>) -> Vec<String> {
+    let exclusions = state.app_exclusions.lock().unwrap();
+    let mut list: Vec<String> = exclusions.iter().cloned().collect();
+    list.sort();
+    list
+}
+
+#[tauri::command]
+fn get_active_process() -> String {
+    os_bridge::get_active_process_name()
+}
+
+#[tauri::command]
+fn set_custom_api_key(state: State<Arc<AppState>>, key: String) {
+    let mut custom = state.custom_api_key.lock().unwrap();
+    if key.trim().is_empty() {
+        *custom = None;
+    } else {
+        *custom = Some(key.trim().to_string());
+    }
+}
+
+#[tauri::command]
+async fn test_gemini_connection(
+    state: State<'_, Arc<AppState>>,
+    api_key: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let key = if let Some(k) = api_key {
+        if !k.trim().is_empty() {
+            k
+        } else {
+            let custom = state.custom_api_key.lock().unwrap();
+            custom.clone().or_else(|| std::env::var("GEMINI_API_KEY").ok()).unwrap_or_default()
+        }
+    } else {
+        let custom = state.custom_api_key.lock().unwrap();
+        custom.clone().or_else(|| std::env::var("GEMINI_API_KEY").ok()).unwrap_or_default()
+    };
+
+    if key.trim().is_empty() {
+        return Err("No Gemini API key configured. Please enter a valid Gemini API key.".to_string());
+    }
+
+    let start = std::time::Instant::now();
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key={}",
+        key.trim()
+    );
+
+    let body = serde_json::json!({
+        "contents": [{
+            "parts": [{ "text": "Ping connection test: respond with OK" }]
+        }]
+    });
+
+    let resp = state
+        .http_client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Network request failed: {}", e))?;
+
+    let status = resp.status().as_u16();
+    let latency_ms = start.elapsed().as_millis();
+
+    if status == 200 {
+        Ok(serde_json::json!({
+            "success": true,
+            "status": "connected",
+            "latency_ms": latency_ms,
+            "model": "gemini-2.5-flash-lite"
+        }))
+    } else if status == 429 {
+        Ok(serde_json::json!({
+            "success": false,
+            "status": "rate_limited",
+            "message": "Free tier quota exceeded (HTTP 429)."
+        }))
+    } else {
+        let err_text = resp.text().await.unwrap_or_default();
+        Err(format!("API error HTTP {}: {}", status, err_text))
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let mut lint_group = LintGroup::new_curated(FstDictionary::curated(), Dialect::American);
@@ -608,6 +824,9 @@ pub fn run() {
             .timeout(std::time::Duration::from_secs(15))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new()),
+        custom_dictionary: Mutex::new(std::collections::HashSet::new()),
+        app_exclusions: Mutex::new(std::collections::HashSet::new()),
+        custom_api_key: Mutex::new(None),
     });
 
     let global_shortcut_plugin = tauri_plugin_global_shortcut::Builder::new()
@@ -620,6 +839,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_sql::Builder::default().build())
         .plugin(global_shortcut_plugin)
         .manage(app_state.clone())
         .setup(move |app| {
@@ -728,7 +948,18 @@ pub fn run() {
             set_widget_size,
             expand_widget,
             collapse_widget,
-            hide_widget
+            hide_widget,
+            add_to_dictionary,
+            remove_from_dictionary,
+            sync_dictionary,
+            get_dictionary_words,
+            add_app_exclusion,
+            remove_app_exclusion,
+            sync_app_exclusions,
+            get_app_exclusions,
+            get_active_process,
+            set_custom_api_key,
+            test_gemini_connection
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -745,6 +976,9 @@ mod engine_tests {
             paused: AtomicBool::new(false),
             lint_group: Mutex::new(LintGroup::new_curated(FstDictionary::curated(), Dialect::American)),
             http_client: reqwest::Client::new(),
+            custom_dictionary: Mutex::new(std::collections::HashSet::new()),
+            app_exclusions: Mutex::new(std::collections::HashSet::new()),
+            custom_api_key: Mutex::new(None),
         });
 
         let doc = Document::new_markdown_default_curated(sample);
@@ -788,5 +1022,23 @@ mod engine_tests {
         assert!(has_correctness, "Should identify correctness issues (e.g. spelling 'definately')");
         assert!(has_clarity, "Should identify clarity issues (e.g. passive voice 'was written by')");
         assert!(has_style, "Should identify style issues (e.g. initialisms 'ASAP')");
+    }
+
+    #[test]
+    fn test_personal_dictionary_suppresses_flagged_word() {
+        let mut custom_dict = std::collections::HashSet::new();
+        custom_dict.insert("nishikanto".to_string());
+
+        let app_state = Arc::new(AppState {
+            paused: AtomicBool::new(false),
+            lint_group: Mutex::new(LintGroup::new_curated(FstDictionary::curated(), Dialect::American)),
+            http_client: reqwest::Client::new(),
+            custom_dictionary: Mutex::new(custom_dict),
+            app_exclusions: Mutex::new(std::collections::HashSet::new()),
+            custom_api_key: Mutex::new(None),
+        });
+
+        let dict = app_state.custom_dictionary.lock().unwrap();
+        assert!(dict.contains("nishikanto"), "Custom dictionary contains nishikanto");
     }
 }

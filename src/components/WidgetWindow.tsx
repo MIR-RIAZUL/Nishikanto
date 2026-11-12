@@ -11,15 +11,19 @@ import {
   Loader2,
   X,
   ChevronRight,
+  BookMarked,
+  ShieldAlert,
 } from "lucide-react";
 import { useTauriState } from "../hooks/useTauriState";
 import { LocalLintResult, GeminiAnalysisResult } from "../hooks/useWritingEngine";
+import { addWordToDictionary, addAppExclusion } from "../services/db";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 
 interface OsCapturePayload {
   text: string;
   source_app: string;
+  process_name?: string;
   method: string;
   bounds: { x: number; y: number; width: number; height: number };
   lints: LocalLintResult[];
@@ -42,6 +46,7 @@ export function WidgetWindow() {
   // OS capture state
   const [capturedText, setCapturedText] = useState<string>("");
   const [sourceApp, setSourceApp] = useState<string>("Active App");
+  const [processName, setProcessName] = useState<string>("");
   const [capturedLints, setCapturedLints] = useState<LocalLintResult[]>([]);
   const [isAiProcessing, setIsAiProcessing] = useState<boolean>(false);
   const [appliedSuccess, setAppliedSuccess] = useState<boolean>(false);
@@ -81,6 +86,7 @@ export function WidgetWindow() {
       const payload = event.payload;
       setCapturedText(payload.text);
       setSourceApp(payload.source_app || "Active App");
+      setProcessName(payload.process_name || "");
       setCapturedLints(payload.lints || []);
       // When Alt+G is pressed, default to compact pill with badge
       setIsExpanded(false);
@@ -137,6 +143,23 @@ export function WidgetWindow() {
     setCapturedLints((prev) => prev.filter((l) => l.id !== lintId));
   };
 
+  const handleAddToDictionary = async (word: string, lintId: string) => {
+    await addWordToDictionary(word);
+    setCapturedLints((prev) => prev.filter((l) => l.id !== lintId));
+    setLastAction(`Saved to Dict: ${word}`);
+    setTimeout(() => setLastAction(null), 2000);
+  };
+
+  const handleBlacklistApp = async () => {
+    const target = (processName || sourceApp).trim();
+    if (!target) return;
+    await addAppExclusion(target, sourceApp || target);
+    setLastAction(`Blacklisted: ${sourceApp}`);
+    setTimeout(() => {
+      handleCollapse();
+    }, 1000);
+  };
+
   // AI Rewrite Modes
   const handleAiRewrite = async (mode: string) => {
     if (!capturedText.trim()) {
@@ -182,6 +205,10 @@ export function WidgetWindow() {
           data-tauri-drag-region
           onMouseDown={(e) => e.preventDefault()}
           onClick={handleExpand}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            handleExpand();
+          }}
           title={
             isClean
               ? "Nishikanto: All clear! Click to open assistant."
@@ -263,6 +290,14 @@ export function WidgetWindow() {
 
           {/* Right: Actions */}
           <div className="flex items-center gap-1">
+            <button
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={handleBlacklistApp}
+              title={`Disable Nishikanto for ${sourceApp} (${processName || "active app"})`}
+              className="p-1 rounded-md text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors cursor-pointer"
+            >
+              <ShieldAlert className="w-3.5 h-3.5" />
+            </button>
             <button
               onMouseDown={(e) => e.preventDefault()}
               onClick={openMainEditor}
@@ -372,8 +407,17 @@ export function WidgetWindow() {
                     {lint.message}
                   </p>
 
-                  {/* Accept Button */}
-                  <div className="flex justify-end pt-1">
+                  {/* Actions: Add to Dict & Accept */}
+                  <div className="flex items-center justify-end gap-1.5 pt-1">
+                    <button
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => handleAddToDictionary(lint.flagged_text, lint.id)}
+                      title="Add to personal dictionary so it is never flagged again"
+                      className="px-2 py-0.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 text-[10px] font-medium flex items-center gap-1 transition-all cursor-pointer"
+                    >
+                      <BookMarked className="w-3 h-3" />
+                      <span>+ Dict</span>
+                    </button>
                     <button
                       onMouseDown={(e) => e.preventDefault()}
                       onClick={() => applySingleLintFix(lint, suggestion)}
