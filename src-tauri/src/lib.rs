@@ -7,8 +7,11 @@ use serde::{Deserialize, Serialize};
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem},
     tray::{TrayIconBuilder, TrayIconEvent},
-    Emitter, LogicalSize, Manager, State, WindowEvent,
+    Emitter, LogicalPosition, LogicalSize, Manager, State, WindowEvent,
 };
+use tauri_plugin_global_shortcut::ShortcutState;
+
+pub mod os_bridge;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalLintResult {
@@ -30,6 +33,15 @@ pub struct GeminiAnalysisResult {
     pub tone: String,
     pub score: u32,
     pub rewritten_text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OsCapturePayload {
+    pub text: String,
+    pub source_app: String,
+    pub method: String,
+    pub bounds: os_bridge::ScreenRect,
+    pub lints: Vec<LocalLintResult>,
 }
 
 pub struct AppState {
@@ -202,7 +214,6 @@ fn check_text_local(
     // Append clarity & passive voice patterns
     let clarity_results = detect_clarity_patterns(&text);
     for item in clarity_results {
-        // Only add if not overlapping existing result
         let overlaps = results.iter().any(|r| {
             !(item.end <= r.start || item.start >= r.end)
         });
@@ -211,7 +222,6 @@ fn check_text_local(
         }
     }
 
-    // Sort results by start character offset
     results.sort_by_key(|r| r.start);
 
     Ok(results)
@@ -388,6 +398,109 @@ async fn analyze_with_gemini(
     })
 }
 
+pub fn trigger_os_capture_and_show(app: &tauri::AppHandle) -> Result<os_bridge::CapturedContext, String> {
+    let context = os_bridge::capture_active_context();
+
+    // Check lints on captured text if non-empty
+    let lints = if !context.text.trim().is_empty() {
+        if let Some(state) = app.try_state::<Arc<AppState>>() {
+            let doc = Document::new_markdown_default_curated(&context.text);
+            if let Ok(mut lg) = state.lint_group.lock() {
+                let mut raw_lints = lg.lint(&doc);
+                remove_overlaps(&mut raw_lints);
+
+                let chars: Vec<char> = context.text.chars().collect();
+                let total = chars.len();
+                let mut res = Vec::new();
+
+                for (idx, lint) in raw_lints.into_iter().enumerate() {
+                    let start = lint.span.start.min(total);
+                    let end = lint.span.end.min(total);
+                    if start < end {
+                        let flagged_text = chars[start..end].iter().collect();
+                        let (cat, subcat) = categorize_lint(lint.lint_kind, &lint.message);
+                        let mut suggestions = Vec::new();
+                        for s in lint.suggestions {
+                            match s {
+                                Suggestion::ReplaceWith(c) => suggestions.push(c.into_iter().collect()),
+                                Suggestion::InsertAfter(c) => suggestions.push(c.into_iter().collect()),
+                                Suggestion::Remove => suggestions.push(String::new()),
+                            }
+                        }
+                        res.push(LocalLintResult {
+                            id: format!("os-lint-{}-{}-{}", start, end, idx),
+                            start,
+                            end,
+                            flagged_text,
+                            category: cat.to_string(),
+                            subcategory: subcat,
+                            message: lint.message,
+                            suggestions,
+                        });
+                    }
+                }
+                res
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    // Calculate smart positioning (beside or just below the active text box)
+    if let Some(widget_win) = app.get_webview_window("widget") {
+        let mut target_x = context.bounds.x;
+        let mut target_y = context.bounds.y + context.bounds.height + 8.0;
+
+        if let Ok(Some(monitor)) = widget_win.current_monitor() {
+            let m_size = monitor.size();
+            let scale = monitor.scale_factor();
+            let screen_w = m_size.width as f64 / scale;
+            let screen_h = m_size.height as f64 / scale;
+
+            target_x = target_x.clamp(16.0, (screen_w - 356.0).max(16.0));
+
+            if target_y + 360.0 > screen_h {
+                target_y = (context.bounds.y - 368.0).max(16.0);
+            } else {
+                target_y = target_y.clamp(16.0, (screen_h - 368.0).max(16.0));
+            }
+        }
+
+        let _ = widget_win.set_position(tauri::Position::Logical(LogicalPosition::new(target_x, target_y)));
+        let _ = widget_win.show();
+    }
+
+    let payload = OsCapturePayload {
+        text: context.text.clone(),
+        source_app: context.source_app.clone(),
+        method: context.method.clone(),
+        bounds: context.bounds.clone(),
+        lints,
+    };
+
+    let _ = app.emit("os-text-captured", payload);
+
+    Ok(context)
+}
+
+#[tauri::command]
+fn replace_active_text(app: tauri::AppHandle, new_text: String) -> Result<(), String> {
+    os_bridge::replace_active_text(&new_text)?;
+    if let Some(widget_win) = app.get_webview_window("widget") {
+        let _ = widget_win.hide();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn capture_active_text(app: tauri::AppHandle) -> Result<os_bridge::CapturedContext, String> {
+    trigger_os_capture_and_show(&app)
+}
+
 #[tauri::command]
 fn get_pause_state(state: State<Arc<AppState>>) -> bool {
     state.paused.load(Ordering::SeqCst)
@@ -441,8 +554,21 @@ pub fn run() {
             .unwrap_or_else(|_| reqwest::Client::new()),
     });
 
+    let shortcut_str = if cfg!(target_os = "macos") { "Option+G" } else { "Alt+G" };
+
+    let global_shortcut_plugin = tauri_plugin_global_shortcut::Builder::new()
+        .with_shortcut(shortcut_str)
+        .expect("valid global shortcut")
+        .with_handler(|app, _shortcut, event| {
+            if event.state() == ShortcutState::Pressed {
+                let _ = trigger_os_capture_and_show(app);
+            }
+        })
+        .build();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(global_shortcut_plugin)
         .manage(app_state.clone())
         .setup(move |app| {
             if let Some(main_win) = app.get_webview_window("main") {
@@ -510,6 +636,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             check_text_local,
             analyze_with_gemini,
+            capture_active_text,
+            replace_active_text,
             get_pause_state,
             toggle_pause_state,
             show_main_window,

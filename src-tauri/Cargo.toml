@@ -17,8 +17,27 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
+tauri-plugin-global-shortcut = "2"
+arboard = "3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 harper-core = { version = "3.0.0", features = ["concurrent"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 dotenvy = "0.15"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Threading",
+    "Win32_System_Com",
+    "Win32_UI_Accessibility",
+] }
+windows = { version = "0.58", features = [
+    "Win32_UI_Accessibility",
+    "Win32_System_Com",
+    "Win32_Foundation",
+] }
+

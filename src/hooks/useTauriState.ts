@@ -78,6 +78,23 @@ export function useTauriState() {
     }
   }, []);
 
+  const replaceActiveText = useCallback(async (newText: string) => {
+    try {
+      await invoke("replace_active_text", { newText });
+    } catch (e) {
+      console.warn("Could not invoke replace_active_text:", e);
+    }
+  }, []);
+
+  const captureActiveText = useCallback(async () => {
+    try {
+      return await invoke("capture_active_text");
+    } catch (e) {
+      console.warn("Could not invoke capture_active_text:", e);
+      return null;
+    }
+  }, []);
+
   return {
     isPaused,
     windowLabel,
@@ -86,5 +103,7 @@ export function useTauriState() {
     openMainEditor,
     hideMainEditor,
     setWidgetHeight,
+    replaceActiveText,
+    captureActiveText,
   };
 }
