@@ -9,7 +9,7 @@ use tauri::{
     tray::{TrayIconBuilder, TrayIconEvent},
     Emitter, LogicalPosition, LogicalSize, Manager, State, WindowEvent,
 };
-use tauri_plugin_global_shortcut::ShortcutState;
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 pub mod os_bridge;
 
@@ -554,11 +554,7 @@ pub fn run() {
             .unwrap_or_else(|_| reqwest::Client::new()),
     });
 
-    let shortcut_str = if cfg!(target_os = "macos") { "Option+G" } else { "Alt+G" };
-
     let global_shortcut_plugin = tauri_plugin_global_shortcut::Builder::new()
-        .with_shortcut(shortcut_str)
-        .expect("valid global shortcut")
         .with_handler(|app, _shortcut, event| {
             if event.state() == ShortcutState::Pressed {
                 let _ = trigger_os_capture_and_show(app);
@@ -571,6 +567,36 @@ pub fn run() {
         .plugin(global_shortcut_plugin)
         .manage(app_state.clone())
         .setup(move |app| {
+            // Dynamic shortcut registration with fallback protection
+            let primary_str = if cfg!(target_os = "macos") { "Option+G" } else { "Alt+G" };
+            let fallback_str = if cfg!(target_os = "macos") { "Option+Shift+G" } else { "Alt+Shift+G" };
+
+            let registered = if let Ok(primary) = primary_str.parse::<Shortcut>() {
+                if let Err(err) = app.global_shortcut().register(primary) {
+                    eprintln!("Warning: Global shortcut '{}' already claimed by system ({:?}). Attempting fallback '{}'...", primary_str, err, fallback_str);
+                    if let Ok(fallback) = fallback_str.parse::<Shortcut>() {
+                        if let Err(fallback_err) = app.global_shortcut().register(fallback) {
+                            eprintln!("Warning: Fallback shortcut '{}' could not be registered: {:?}", fallback_str, fallback_err);
+                            false
+                        } else {
+                            println!("Registered global shortcut fallback: {}", fallback_str);
+                            true
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    println!("Registered global shortcut: {}", primary_str);
+                    true
+                }
+            } else {
+                false
+            };
+
+            if !registered {
+                eprintln!("Note: OS global shortcut could not be bound; manual widget capture remains active.");
+            }
+
             if let Some(main_win) = app.get_webview_window("main") {
                 let main_clone = main_win.clone();
                 main_win.on_window_event(move |event| {
