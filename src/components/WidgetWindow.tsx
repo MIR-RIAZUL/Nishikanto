@@ -13,6 +13,7 @@ import {
   ChevronRight,
   BookMarked,
   ShieldAlert,
+  Trash2,
 } from "lucide-react";
 import { useTauriState } from "../hooks/useTauriState";
 import { LocalLintResult, GeminiAnalysisResult } from "../hooks/useWritingEngine";
@@ -29,6 +30,22 @@ interface OsCapturePayload {
   lints: LocalLintResult[];
 }
 
+type WidgetMode = "pill" | "micro" | "full";
+
+function getRuleDescription(lint: LocalLintResult): string {
+  const msg = lint.message.toLowerCase();
+  if (msg.includes("capitalize")) return "Capitalize the word";
+  if (msg.includes("spelling") || msg.includes("did you mean")) return "Spelling mistake";
+  if (msg.includes("passive")) return "Passive voice";
+  if (msg.includes("redundant") || msg.includes("wordy")) return "Wordiness / Redundancy";
+  if (lint.subcategory) {
+    return lint.subcategory
+      .replace(/_/g, " ")
+      .replace(/\b\w/g, (c) => c.toUpperCase());
+  }
+  return lint.category === "Correctness" ? "Correctness error" : "Clarity suggestion";
+}
+
 export function WidgetWindow() {
   const {
     isPaused,
@@ -36,11 +53,14 @@ export function WidgetWindow() {
     expandWidget,
     collapseWidget,
     replaceActiveText,
+    replaceSingleWord,
+    showMicroPopover,
     captureActiveText,
   } = useTauriState();
 
-  // State: pill (false) vs expanded popover (true)
-  const [isExpanded, setIsExpanded] = useState<boolean>(false);
+  // Widget display modes: "pill" (40x40 circular button), "micro" (Grammarly popover card), "full" (AI tone & rewrite panel)
+  const [mode, setMode] = useState<WidgetMode>("pill");
+  const [activeMicroLint, setActiveMicroLint] = useState<LocalLintResult | null>(null);
   const [lastAction, setLastAction] = useState<string | null>(null);
 
   // OS capture state
@@ -55,10 +75,22 @@ export function WidgetWindow() {
   const overallTone = useMemo(() => {
     if (!capturedText) return "Confident 🎯";
     const lower = capturedText.toLowerCase();
-    if (lower.includes("hey") || lower.includes("thanks") || lower.includes("cool") || lower.includes("awesome") || lower.includes("!")) {
+    if (
+      lower.includes("hey") ||
+      lower.includes("thanks") ||
+      lower.includes("cool") ||
+      lower.includes("awesome") ||
+      lower.includes("!")
+    ) {
       return "Friendly ☕";
     }
-    if (lower.includes("furthermore") || lower.includes("therefore") || lower.includes("in regards to") || lower.includes("respectfully") || lower.includes("sincerely")) {
+    if (
+      lower.includes("furthermore") ||
+      lower.includes("therefore") ||
+      lower.includes("in regards to") ||
+      lower.includes("respectfully") ||
+      lower.includes("sincerely")
+    ) {
       return "Formal 🏛️";
     }
     const words = capturedText.trim().split(/\s+/).length;
@@ -69,51 +101,143 @@ export function WidgetWindow() {
   }, [capturedText, capturedLints]);
 
   // Expansion and collapse handlers
-  const handleExpand = useCallback(async () => {
-    setIsExpanded(true);
+  const handleExpandToFull = useCallback(async () => {
+    setMode("full");
     await expandWidget();
   }, [expandWidget]);
 
-  const handleCollapse = useCallback(async () => {
-    setIsExpanded(false);
+  const handleCollapseToPill = useCallback(async () => {
+    setMode("pill");
+    setActiveMicroLint(null);
     await collapseWidget();
   }, [collapseWidget]);
 
-  // Listen to OS hotkey capture events
+  // Handle pill click (trigger micro-popover on first flagged word or expand)
+  const handlePillClick = useCallback(async () => {
+    if (capturedLints.length > 0) {
+      const target = capturedLints.find((l) => !!l.screen_bounds) || capturedLints[0];
+      if (target && target.screen_bounds) {
+        setActiveMicroLint(target);
+        setMode("micro");
+        await showMicroPopover(
+          target.screen_bounds.x,
+          target.screen_bounds.y + target.screen_bounds.height + 6.0,
+          target
+        );
+        return;
+      }
+    }
+    await handleExpandToFull();
+  }, [capturedLints, showMicroPopover, handleExpandToFull]);
+
+  // Listen to OS hotkey capture & hover events
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
+    let unlistenCapture: (() => void) | undefined;
+    let unlistenHover: (() => void) | undefined;
+    let unlistenUnhover: (() => void) | undefined;
+    let unlistenResolved: (() => void) | undefined;
+
     listen<OsCapturePayload>("os-text-captured", (event) => {
       const payload = event.payload;
       setCapturedText(payload.text);
       setSourceApp(payload.source_app || "Active App");
       setProcessName(payload.process_name || "");
       setCapturedLints(payload.lints || []);
-      // When Alt+G is pressed, default to compact pill with badge
-      setIsExpanded(false);
-      collapseWidget();
       setLastAction("Captured via Alt+G");
       setTimeout(() => setLastAction(null), 2500);
     }).then((fn) => {
-      unlisten = fn;
+      unlistenCapture = fn;
+    });
+
+    listen<LocalLintResult>("os-lint-hovered", (event) => {
+      setActiveMicroLint(event.payload);
+      setMode((current) => (current === "full" ? "full" : "micro"));
+    }).then((fn) => {
+      unlistenHover = fn;
+    });
+
+    listen("os-lint-unhovered", () => {
+      setMode((current) => (current === "micro" ? "pill" : current));
+    }).then((fn) => {
+      unlistenUnhover = fn;
+    });
+
+    listen<string>("os-lint-resolved", (event) => {
+      const resolvedId = event.payload;
+      setCapturedLints((prev) => prev.filter((l) => l.id !== resolvedId));
+      setActiveMicroLint((current) => (current?.id === resolvedId ? null : current));
+    }).then((fn) => {
+      unlistenResolved = fn;
     });
 
     return () => {
-      if (unlisten) unlisten();
+      if (unlistenCapture) unlistenCapture();
+      if (unlistenHover) unlistenHover();
+      if (unlistenUnhover) unlistenUnhover();
+      if (unlistenResolved) unlistenResolved();
     };
-  }, [collapseWidget]);
+  }, []);
 
   // Auto-collapse on Escape key
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && isExpanded) {
-        handleCollapse();
+      if (e.key === "Escape") {
+        if (mode === "full" || mode === "micro") {
+          handleCollapseToPill();
+        }
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isExpanded, handleCollapse]);
+  }, [mode, handleCollapseToPill]);
 
-  // 1-Click Replacement into external app
+  // Accept single word suggestion from micro-popover (replaces ONLY that word)
+  const handleAcceptSingleWord = async (lint: LocalLintResult) => {
+    const replacement = lint.suggestions[0] || "fix";
+    const chars = Array.from(capturedText);
+    const before = chars.slice(0, lint.start).join("");
+    const after = chars.slice(lint.end).join("");
+    const updatedFull = before + replacement + after;
+
+    await replaceSingleWord(
+      lint.start,
+      lint.end,
+      replacement,
+      updatedFull,
+      lint.id
+    );
+
+    setCapturedText(updatedFull);
+    setCapturedLints((prev) => prev.filter((l) => l.id !== lint.id));
+    setActiveMicroLint(null);
+    setMode("pill");
+    await collapseWidget();
+  };
+
+  // Dismiss a lint from current session
+  const handleDismissLint = async (lintId: string) => {
+    setCapturedLints((prev) => prev.filter((l) => l.id !== lintId));
+    if (activeMicroLint?.id === lintId) {
+      setActiveMicroLint(null);
+      setMode("pill");
+      await collapseWidget();
+    }
+  };
+
+  // Add word to personal dictionary
+  const handleAddToDictionary = async (word: string, lintId: string) => {
+    await addWordToDictionary(word);
+    setCapturedLints((prev) => prev.filter((l) => l.id !== lintId));
+    setLastAction(`Saved to Dict: ${word}`);
+    setTimeout(() => setLastAction(null), 2000);
+    if (activeMicroLint?.id === lintId) {
+      setActiveMicroLint(null);
+      setMode("pill");
+      await collapseWidget();
+    }
+  };
+
+  // Apply replacement for full panel
   const handleApplyReplacement = async (newText: string) => {
     setAppliedSuccess(true);
     await replaceActiveText(newText);
@@ -121,33 +245,8 @@ export function WidgetWindow() {
       setAppliedSuccess(false);
       setCapturedText("");
       setCapturedLints([]);
-      handleCollapse();
+      handleCollapseToPill();
     }, 1200);
-  };
-
-  // Accept single lint suggestion
-  const applySingleLintFix = async (lint: LocalLintResult, replacement: string) => {
-    const chars = Array.from(capturedText);
-    const before = chars.slice(0, lint.start).join("");
-    const after = chars.slice(lint.end).join("");
-    const updated = before + replacement + after;
-
-    setCapturedText(updated);
-    setCapturedLints((prev) => prev.filter((l) => l.id !== lint.id));
-
-    // Immediately replace into the external app
-    await handleApplyReplacement(updated);
-  };
-
-  const dismissLint = (lintId: string) => {
-    setCapturedLints((prev) => prev.filter((l) => l.id !== lintId));
-  };
-
-  const handleAddToDictionary = async (word: string, lintId: string) => {
-    await addWordToDictionary(word);
-    setCapturedLints((prev) => prev.filter((l) => l.id !== lintId));
-    setLastAction(`Saved to Dict: ${word}`);
-    setTimeout(() => setLastAction(null), 2000);
   };
 
   const handleBlacklistApp = async () => {
@@ -156,12 +255,12 @@ export function WidgetWindow() {
     await addAppExclusion(target, sourceApp || target);
     setLastAction(`Blacklisted: ${sourceApp}`);
     setTimeout(() => {
-      handleCollapse();
+      handleCollapseToPill();
     }, 1000);
   };
 
   // AI Rewrite Modes
-  const handleAiRewrite = async (mode: string) => {
+  const handleAiRewrite = async (modeName: string) => {
     if (!capturedText.trim()) {
       await captureActiveText();
       return;
@@ -170,16 +269,15 @@ export function WidgetWindow() {
     try {
       const res = await invoke<GeminiAnalysisResult>("analyze_with_gemini", {
         text: capturedText,
-        mode,
+        mode: modeName,
       });
       if (res.rewritten_text) {
         setCapturedText(res.rewritten_text);
-        // re-run local check on newly rewritten text
         const newLints = await invoke<LocalLintResult[]>("check_text_local", {
           text: res.rewritten_text,
         });
         setCapturedLints(newLints);
-        setLastAction(`AI: ${mode}`);
+        setLastAction(`AI: ${modeName}`);
         setTimeout(() => setLastAction(null), 2500);
       }
     } catch (e) {
@@ -190,9 +288,9 @@ export function WidgetWindow() {
   };
 
   // -------------------------------------------------------------
-  // 1. COMPACT FLOATING PILL STATE (40x40px sleek draggable pill)
+  // 1. COMPACT FLOATING PILL STATE (40x40px sleek circular pill)
   // -------------------------------------------------------------
-  if (!isExpanded) {
+  if (mode === "pill") {
     const issueCount = capturedLints.length;
     const isClean = issueCount === 0;
 
@@ -204,15 +302,15 @@ export function WidgetWindow() {
         <button
           data-tauri-drag-region
           onMouseDown={(e) => e.preventDefault()}
-          onClick={handleExpand}
+          onClick={handlePillClick}
           onContextMenu={(e) => {
             e.preventDefault();
-            handleExpand();
+            handleExpandToFull();
           }}
           title={
             isClean
               ? "Nishikanto: All clear! Click to open assistant."
-              : `Nishikanto: ${issueCount} suggestion${issueCount === 1 ? "" : "s"}. Click to open.`
+              : `Nishikanto: ${issueCount} suggestion${issueCount === 1 ? "" : "s"}. Click to review.`
           }
           className={`w-10 h-10 rounded-full cursor-pointer relative flex items-center justify-center transition-all duration-300 shadow-[0_4px_20px_rgba(0,0,0,0.65)] hover:scale-105 active:scale-95 ${
             isClean
@@ -251,11 +349,88 @@ export function WidgetWindow() {
   }
 
   // -------------------------------------------------------------
-  // 2. SMOOTH POPOVER EXPANSION (340x420px Glassmorphic Card)
+  // 2. GRAMMARLY-STYLE MICRO-POPOVER CARD (260x145px)
+  // -------------------------------------------------------------
+  if (mode === "micro" && activeMicroLint) {
+    const primarySuggestion = activeMicroLint.suggestions[0] || "Fix";
+
+    return (
+      <div className="fixed inset-0 w-full h-full p-1.5 flex items-center justify-center select-none font-sans antialiased text-slate-900">
+        <div className="bg-white text-slate-900 rounded-xl shadow-2xl border border-slate-200 w-64 p-3 flex flex-col gap-1.5 animate-fadeIn">
+          {/* Top line: Muted gray rule description */}
+          <div className="flex items-center justify-between text-xs text-slate-400 font-medium">
+            <span className="truncate pr-1">{getRuleDescription(activeMicroLint)}</span>
+            <button
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => handleDismissLint(activeMicroLint.id)}
+              title="Dismiss"
+              className="text-slate-400 hover:text-slate-600 transition-colors cursor-pointer p-0.5 shrink-0"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          {/* Primary Action: Bold blue clickable suggestion */}
+          <div>
+            <button
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => handleAcceptSingleWord(activeMicroLint)}
+              title={`Replace "${activeMicroLint.flagged_text}" with "${primarySuggestion}"`}
+              className="text-base font-bold text-blue-600 hover:bg-blue-50 px-2 py-1 rounded-md cursor-pointer transition-colors inline-block -ml-2"
+            >
+              {primarySuggestion}
+            </button>
+          </div>
+
+          {/* Second Action: "Dismiss" row with a subtle trash icon */}
+          <div className="flex items-center justify-between pt-0.5">
+            <button
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => handleDismissLint(activeMicroLint.id)}
+              className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-800 cursor-pointer py-0.5 px-1 rounded transition-colors -ml-1"
+            >
+              <Trash2 className="w-3.5 h-3.5 text-slate-400" />
+              <span>Dismiss</span>
+            </button>
+
+            {activeMicroLint.category === "Correctness" && (
+              <button
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => handleAddToDictionary(activeMicroLint.flagged_text, activeMicroLint.id)}
+                title="Add to dictionary so it's never flagged again"
+                className="text-[11px] text-slate-500 hover:text-emerald-600 flex items-center gap-1 cursor-pointer transition-colors"
+              >
+                <BookMarked className="w-3 h-3" />
+                <span>+ Dict</span>
+              </button>
+            )}
+          </div>
+
+          {/* Bottom Action: "See more in Nishikanto" row with Nishikanto's mini icon */}
+          <button
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={handleExpandToFull}
+            className="flex items-center justify-between text-xs text-slate-600 hover:bg-slate-100 border-t border-slate-100 pt-2 mt-1 -mx-1 px-1.5 py-1 rounded cursor-pointer transition-colors"
+          >
+            <span className="flex items-center gap-1.5 font-medium">
+              <div className="w-4 h-4 rounded-md bg-gradient-to-tr from-indigo-500 to-purple-600 flex items-center justify-center shadow-xs">
+                <Sparkles className="w-2.5 h-2.5 text-white" />
+              </div>
+              <span>See more in Nishikanto</span>
+            </span>
+            <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // -------------------------------------------------------------
+  // 3. FULL AI TONE & REWRITE PANEL (340x420px Glassmorphic Card)
   // -------------------------------------------------------------
   return (
     <div
-      onClick={handleCollapse}
+      onClick={handleCollapseToPill}
       className="fixed inset-0 w-full h-full p-2 flex flex-col justify-start select-none font-sans antialiased text-slate-100"
     >
       {/* Crisp Glassmorphic Card */}
@@ -308,7 +483,7 @@ export function WidgetWindow() {
             </button>
             <button
               onMouseDown={(e) => e.preventDefault()}
-              onClick={handleCollapse}
+              onClick={handleCollapseToPill}
               title="Collapse to pill (Esc)"
               className="p-1 rounded-md text-slate-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
             >
@@ -383,7 +558,7 @@ export function WidgetWindow() {
                     </span>
                     <button
                       onMouseDown={(e) => e.preventDefault()}
-                      onClick={() => dismissLint(lint.id)}
+                      onClick={() => handleDismissLint(lint.id)}
                       title="Ignore suggestion"
                       className="text-slate-500 hover:text-slate-300 p-0.5 rounded transition-colors cursor-pointer"
                     >
@@ -420,7 +595,7 @@ export function WidgetWindow() {
                     </button>
                     <button
                       onMouseDown={(e) => e.preventDefault()}
-                      onClick={() => applySingleLintFix(lint, suggestion)}
+                      onClick={() => handleAcceptSingleWord(lint)}
                       className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-semibold flex items-center gap-1 shadow-sm transition-all cursor-pointer"
                     >
                       <Check className="w-3 h-3" />
@@ -435,7 +610,7 @@ export function WidgetWindow() {
 
         {/* Footer: AI Bar & Replace Button */}
         <div className="p-2.5 border-t border-white/10 bg-slate-900/60 flex flex-col gap-2">
-          {/* AI Rewrite Chips */}
+          {/* AI Rewrite Chips powered by gemini-3.5-flash-lite */}
           <div className="grid grid-cols-4 gap-1">
             <button
               onMouseDown={(e) => e.preventDefault()}

@@ -8,6 +8,7 @@ export function UnderlinesWindow() {
   useEffect(() => {
     let unlistenUpdated: (() => void) | undefined;
     let unlistenCleared: (() => void) | undefined;
+    let unlistenResolved: (() => void) | undefined;
 
     // Listen for live screen bounding boxes for misspelled or flagged words
     listen<LocalLintResult[]>("os-underlines-updated", (event) => {
@@ -15,6 +16,14 @@ export function UnderlinesWindow() {
       setLints(active);
     }).then((fn) => {
       unlistenUpdated = fn;
+    });
+
+    // Listen for single lint resolution (word replaced or dismissed)
+    listen<string>("os-lint-resolved", (event) => {
+      const resolvedId = event.payload;
+      setLints((prev) => prev.filter((l) => l.id !== resolvedId));
+    }).then((fn) => {
+      unlistenResolved = fn;
     });
 
     // Listen for clear events (scrolling, window switch, clearing text, or blacklisted app)
@@ -30,6 +39,7 @@ export function UnderlinesWindow() {
     return () => {
       if (unlistenUpdated) unlistenUpdated();
       if (unlistenCleared) unlistenCleared();
+      if (unlistenResolved) unlistenResolved();
       window.removeEventListener("scroll", handleClear, true);
     };
   }, []);

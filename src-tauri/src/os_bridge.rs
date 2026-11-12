@@ -433,6 +433,80 @@ mod platform {
 
         Ok(())
     }
+
+    pub fn get_cursor_position() -> Option<(f64, f64)> {
+        unsafe {
+            let mut pt = windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
+            if GetCursorPos(&mut pt) != 0 {
+                Some((pt.x as f64, pt.y as f64))
+            } else {
+                None
+            }
+        }
+    }
+
+    pub fn replace_single_word(
+        start: usize,
+        end: usize,
+        replacement: &str,
+        full_text_fallback: &str,
+    ) -> Result<(), String> {
+        let saved_hwnd = LAST_FOREGROUND_HWND.load(Ordering::SeqCst);
+        if saved_hwnd != 0 {
+            unsafe {
+                SetForegroundWindow(saved_hwnd as HWND);
+                std::thread::sleep(Duration::from_millis(30));
+            }
+        }
+
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            if let Ok(automation) = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) {
+                if let Ok(focused) = automation.GetFocusedElement() {
+                    // Try TextPattern word range selection first
+                    if let Ok(text_pattern) = focused.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) {
+                        if let Ok(doc_range) = text_pattern.DocumentRange() {
+                            if let Ok(word_range) = doc_range.Clone() {
+                                let _ = word_range.Move(TextUnit_Character, start as i32);
+                                let len = end.saturating_sub(start);
+                                let _ = word_range.MoveEndpointByUnit(
+                                    TextPatternRangeEndpoint_End,
+                                    TextUnit_Character,
+                                    len as i32,
+                                );
+
+                                if word_range.Select().is_ok() {
+                                    std::thread::sleep(Duration::from_millis(30));
+                                    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+                                    let backup_text = clipboard.get_text().ok();
+
+                                    clipboard.set_text(replacement).map_err(|e| e.to_string())?;
+                                    simulate_key_combination(VK_CONTROL, b'V' as u16);
+                                    std::thread::sleep(Duration::from_millis(60));
+
+                                    if let Some(orig) = backup_text {
+                                        let _ = clipboard.set_text(orig);
+                                    }
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    }
+
+                    // ValuePattern fallback with full substituted text
+                    if let Ok(val_pattern) = focused.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) {
+                        let bstr = BSTR::from(full_text_fallback);
+                        if val_pattern.SetValue(&bstr).is_ok() {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Full clipboard fallback
+        replace_active_text(full_text_fallback)
+    }
 }
 
 #[cfg(not(windows))]
@@ -518,14 +592,29 @@ mod platform {
 
         Ok(())
     }
+
+    pub fn get_cursor_position() -> Option<(f64, f64)> {
+        None
+    }
+
+    pub fn replace_single_word(
+        _start: usize,
+        _end: usize,
+        _replacement: &str,
+        full_text_fallback: &str,
+    ) -> Result<(), String> {
+        replace_active_text(full_text_fallback)
+    }
 }
 
 pub use platform::{
     capture_active_context,
     capture_via_accessibility,
     extract_lint_screen_rects,
+    get_cursor_position,
     get_foreground_window_state,
     replace_active_text,
+    replace_single_word,
 };
 
 pub fn get_active_process_name() -> String {

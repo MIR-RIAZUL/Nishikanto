@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { LocalLintResult } from "./useWritingEngine";
 
 export function useTauriState() {
   const [isPaused, setIsPaused] = useState<boolean>(false);
@@ -118,6 +119,40 @@ export function useTauriState() {
     }
   }, []);
 
+  const replaceSingleWord = useCallback(
+    async (
+      start: number,
+      end: number,
+      replacement: string,
+      fullTextFallback: string,
+      lintId: string
+    ) => {
+      try {
+        await invoke("replace_single_word", {
+          start,
+          end,
+          replacement,
+          fullTextFallback,
+          lintId,
+        });
+      } catch (e) {
+        console.warn("Could not invoke replace_single_word:", e);
+      }
+    },
+    []
+  );
+
+  const showMicroPopover = useCallback(
+    async (x: number, y: number, lint: LocalLintResult) => {
+      try {
+        await invoke("show_micro_popover", { x, y, lint });
+      } catch (e) {
+        console.warn("Could not invoke show_micro_popover:", e);
+      }
+    },
+    []
+  );
+
   const captureActiveText = useCallback(async () => {
     try {
       return await invoke("capture_active_text");
@@ -140,6 +175,8 @@ export function useTauriState() {
     collapseWidget,
     hideWidget,
     replaceActiveText,
+    replaceSingleWord,
+    showMicroPopover,
     captureActiveText,
   };
 }

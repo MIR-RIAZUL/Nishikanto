@@ -647,6 +647,57 @@ fn replace_active_text(
 }
 
 #[tauri::command]
+fn replace_single_word(
+    app: tauri::AppHandle,
+    state: State<Arc<AppState>>,
+    start: usize,
+    end: usize,
+    replacement: String,
+    full_text_fallback: String,
+    lint_id: String,
+) -> Result<(), String> {
+    state.widget_expanded.store(false, Ordering::SeqCst);
+    os_bridge::replace_single_word(start, end, &replacement, &full_text_fallback)?;
+    let _ = app.emit("os-lint-resolved", lint_id);
+    if let Some(widget_win) = app.get_webview_window("widget") {
+        let _ = widget_win.set_size(LogicalSize::new(52.0, 52.0));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn show_micro_popover(
+    app: tauri::AppHandle,
+    state: State<Arc<AppState>>,
+    x: f64,
+    y: f64,
+    lint: LocalLintResult,
+) {
+    state.widget_expanded.store(false, Ordering::SeqCst);
+    if let Some(widget_win) = app.get_webview_window("widget") {
+        let (mon_x, mon_y, mon_w, mon_h) = if let Ok(Some(mon)) = widget_win.current_monitor() {
+            let p = mon.position();
+            let s = mon.size();
+            let scale = mon.scale_factor();
+            (p.x as f64 / scale, p.y as f64 / scale, s.width as f64 / scale, s.height as f64 / scale)
+        } else {
+            (0.0, 0.0, 1920.0, 1080.0)
+        };
+
+        let pop_w = 264.0;
+        let pop_h = 145.0;
+
+        let clamped_x = x.clamp(mon_x + 8.0, (mon_x + mon_w - pop_w - 8.0).max(mon_x + 8.0));
+        let clamped_y = y.clamp(mon_y + 8.0, (mon_y + mon_h - pop_h - 8.0).max(mon_y + 8.0));
+
+        let _ = widget_win.set_position(tauri::Position::Logical(LogicalPosition::new(clamped_x, clamped_y)));
+        let _ = widget_win.set_size(LogicalSize::new(pop_w, pop_h));
+        let _ = widget_win.show();
+        let _ = app.emit("os-lint-hovered", lint);
+    }
+}
+
+#[tauri::command]
 fn expand_widget(app: tauri::AppHandle, state: State<Arc<AppState>>) {
     state.widget_expanded.store(true, Ordering::SeqCst);
     if let Some(widget_win) = app.get_webview_window("widget") {
@@ -1113,6 +1164,11 @@ pub fn run() {
                 };
                 let mut last_hwnd: isize = 0;
                 let mut non_text_ticks: u32 = 0;
+                let mut cached_lints: Vec<LocalLintResult> = Vec::new();
+                let mut current_hovered_lint_id: Option<String> = None;
+                let mut popover_rect: Option<(f64, f64, f64, f64)> = None;
+                let mut hover_leave_ticks: u32 = 0;
+                let mut accessibility_ticks: u32 = 0;
 
                 let current_exe_name = std::env::current_exe()
                     .ok()
@@ -1120,11 +1176,104 @@ pub fn run() {
                     .unwrap_or_default();
 
                 loop {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    std::thread::sleep(std::time::Duration::from_millis(50));
 
                     if watcher_state.paused.load(Ordering::SeqCst) {
                         continue;
                     }
+
+                    // Passive cursor hit-testing over underlined words (50ms responsive hover)
+                    if !watcher_state.widget_expanded.load(Ordering::SeqCst) {
+                        if let Some((raw_cur_x, raw_cur_y)) = os_bridge::get_cursor_position() {
+                            if let Some(widget_win) = watcher_app.get_webview_window("widget") {
+                                let sf = widget_win
+                                    .current_monitor()
+                                    .ok()
+                                    .flatten()
+                                    .map(|m| m.scale_factor())
+                                    .unwrap_or(1.0);
+                                let cur_x = raw_cur_x / sf;
+                                let cur_y = raw_cur_y / sf;
+
+                                let mut found_hovered: Option<&LocalLintResult> = None;
+                                for lint in &cached_lints {
+                                    if let Some(ref sb) = lint.screen_bounds {
+                                        if cur_x >= sb.x - 4.0
+                                            && cur_x <= sb.x + sb.width + 4.0
+                                            && cur_y >= sb.y - 4.0
+                                            && cur_y <= sb.y + sb.height + 8.0
+                                        {
+                                            found_hovered = Some(lint);
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                if let Some(hovered) = found_hovered {
+                                    hover_leave_ticks = 0;
+                                    if current_hovered_lint_id.as_deref() != Some(&hovered.id) {
+                                        current_hovered_lint_id = Some(hovered.id.clone());
+
+                                        let sb = hovered.screen_bounds.as_ref().unwrap();
+                                        let target_x = sb.x;
+                                        let target_y = sb.y + sb.height + 6.0;
+
+                                        let pop_w = 264.0;
+                                        let pop_h = 145.0;
+
+                                        let (mon_x, mon_y, mon_w, mon_h) = if let Ok(Some(mon)) = widget_win.current_monitor() {
+                                            let p = mon.position();
+                                            let s = mon.size();
+                                            let scale = mon.scale_factor();
+                                            (p.x as f64 / scale, p.y as f64 / scale, s.width as f64 / scale, s.height as f64 / scale)
+                                        } else {
+                                            (0.0, 0.0, 1920.0, 1080.0)
+                                        };
+
+                                        let clamped_x = target_x.clamp(mon_x + 8.0, (mon_x + mon_w - pop_w - 8.0).max(mon_x + 8.0));
+                                        let clamped_y = target_y.clamp(mon_y + 8.0, (mon_y + mon_h - pop_h - 8.0).max(mon_y + 8.0));
+
+                                        popover_rect = Some((clamped_x, clamped_y, pop_w, pop_h));
+
+                                        let _ = widget_win.set_position(tauri::Position::Logical(LogicalPosition::new(clamped_x, clamped_y)));
+                                        let _ = widget_win.set_size(LogicalSize::new(pop_w, pop_h));
+                                        let _ = widget_win.show();
+                                        let _ = watcher_app.emit("os-lint-hovered", hovered);
+                                    }
+                                } else {
+                                    // Not over a word. Check if cursor is inside the micro-popover card itself
+                                    let is_inside_popover = if let Some((px, py, pw, ph)) = popover_rect {
+                                        cur_x >= px - 6.0 && cur_x <= px + pw + 6.0 && cur_y >= py - 6.0 && cur_y <= py + ph + 6.0
+                                    } else {
+                                        false
+                                    };
+
+                                    if is_inside_popover {
+                                        hover_leave_ticks = 0;
+                                    } else if current_hovered_lint_id.is_some() {
+                                        hover_leave_ticks += 1;
+                                        if hover_leave_ticks >= 6 {
+                                            current_hovered_lint_id = None;
+                                            popover_rect = None;
+                                            hover_leave_ticks = 0;
+
+                                            // Return to compact floating pill
+                                            let (px, py) = calculate_smart_pill_position(&last_bounds, &widget_win);
+                                            let _ = widget_win.set_position(tauri::Position::Logical(LogicalPosition::new(px, py)));
+                                            let _ = widget_win.set_size(LogicalSize::new(52.0, 52.0));
+                                            let _ = watcher_app.emit("os-lint-unhovered", ());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    accessibility_ticks += 1;
+                    if accessibility_ticks < 10 {
+                        continue;
+                    }
+                    accessibility_ticks = 0;
 
                     let win_state = os_bridge::get_foreground_window_state();
                     if win_state.hwnd_val == 0 {
@@ -1147,6 +1296,9 @@ pub fn run() {
                             }
                         }
                         clear_underlines_window(&watcher_app);
+                        cached_lints.clear();
+                        current_hovered_lint_id = None;
+                        popover_rect = None;
                         last_text.clear();
                         continue;
                     }
@@ -1171,6 +1323,9 @@ pub fn run() {
                             }
                         }
                         clear_underlines_window(&watcher_app);
+                        cached_lints.clear();
+                        current_hovered_lint_id = None;
+                        popover_rect = None;
                         last_text.clear();
                         continue;
                     }
@@ -1186,6 +1341,8 @@ pub fn run() {
                         if text_changed || bounds_changed || window_switched {
                             if window_switched {
                                 clear_underlines_window(&watcher_app);
+                                current_hovered_lint_id = None;
+                                popover_rect = None;
                             }
 
                             last_text = ctx.text.clone();
@@ -1264,6 +1421,8 @@ pub fn run() {
                                 os_bridge::extract_lint_screen_rects(&mut lints, &ctx.bounds, sf);
                             }
 
+                            cached_lints = lints.clone();
+
                             // Update underlines overlay window
                             update_underlines_window(&watcher_app, &lints);
 
@@ -1277,8 +1436,8 @@ pub fn run() {
                             };
                             let _ = watcher_app.emit("os-text-captured", payload);
 
-                            // Position widget using smart pill positioning
-                            if !watcher_state.widget_expanded.load(Ordering::SeqCst) {
+                            // Position widget using smart pill positioning when not hovering or expanded
+                            if !watcher_state.widget_expanded.load(Ordering::SeqCst) && current_hovered_lint_id.is_none() {
                                 if let Some(widget_win) = watcher_app.get_webview_window("widget") {
                                     let (target_x, target_y) = calculate_smart_pill_position(&ctx.bounds, &widget_win);
 
@@ -1305,6 +1464,9 @@ pub fn run() {
                                 }
                             }
                             clear_underlines_window(&watcher_app);
+                            cached_lints.clear();
+                            current_hovered_lint_id = None;
+                            popover_rect = None;
                             last_text.clear();
                         }
                     }
@@ -1337,7 +1499,9 @@ pub fn run() {
             get_app_exclusions,
             get_active_process,
             set_custom_api_key,
-            test_gemini_connection
+            test_gemini_connection,
+            replace_single_word,
+            show_micro_popover
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
